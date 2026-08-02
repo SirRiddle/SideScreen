@@ -485,7 +485,7 @@ struct SettingsView: View {
                                 .disabled(!settings.touchEnabled)
 
                                 if settings.penModeEnabled && settings.touchEnabled {
-                                    Text("Drawing mode is on — 1-finger scroll, momentum, double tap and tap-and-hold right click are off. Two fingers still scroll and pinch.")
+                                    Text("Drawing mode is on — 1-finger scroll, momentum and tap-and-hold right click are off. Tap, double tap, two-finger scroll and pinch still work.")
                                         .font(.system(size: 10))
                                         .foregroundColor(.orange)
                                 }

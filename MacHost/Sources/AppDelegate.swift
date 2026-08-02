@@ -733,6 +733,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // Double tap tracking
     private var lastTapTime: UInt64 = 0
     private var lastTapPosition: CGPoint = .zero
+    /// Click count of the pen press currently held down, so its release can match it.
+    private var penClickState: Int64 = 1
 
     // Long press timer
     private var longPressTimer: DispatchWorkItem?
@@ -820,12 +822,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         touchStartPosition = point
         touchLastPosition = point
+        touchStartTime = DispatchTime.now().uptimeNanoseconds
         gestureState = .penDrawing
+
+        // A press has to declare its click count up front: a second tap that lands close
+        // enough to the first, soon enough after it, is click 2 of a double click. The
+        // trackpad path decides this on mouse-up because it buffers the whole tap; pen
+        // mode presses on contact, so the decision moves here.
+        let doubleTapWindow = touchStartTime - lastTapTime < GestureThresholds.doubleTapMaxTime
+        let doubleTapReach = hypot(point.x - lastTapPosition.x, point.y - lastTapPosition.y)
+            < GestureThresholds.doubleTapMaxDistance
+        penClickState = (lastTapTime != 0 && doubleTapWindow && doubleTapReach) ? 2 : 1
 
         // Park the cursor on the contact point first so the app sees the press where
         // the pen actually is, then press immediately (no long-press threshold).
         moveCursor(to: point)
-        injectMouseDown(at: point)
+        injectMouseDown(at: point, clickState: penClickState)
     }
 
     private func penMove(to point: CGPoint) {
@@ -846,11 +858,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // .dragging is possible if the mode was switched on mid-stroke — release either way,
         // a stuck left button would be worse than a lost stroke.
         guard gestureState == .penDrawing || gestureState == .dragging else { return }
-        // clickState marks this as the release of a complete click, matching the down
-        // event; without it a tap is a half-formed click and controls that act on
-        // mouseUp ignore it.
-        injectMouseUp(at: point, clickState: 1)
+        // Match the click count of the press. Without it the release reads as a
+        // half-formed click and controls that act on mouse-up ignore it.
+        injectMouseUp(at: point, clickState: penClickState)
         gestureState = .idle
+
+        // Only a short, stationary contact can start or continue a double tap; a drawn
+        // stroke that happens to end near an earlier tap must not chain into one.
+        let now = DispatchTime.now().uptimeNanoseconds
+        let travelled = hypot(point.x - touchStartPosition.x, point.y - touchStartPosition.y)
+        let wasTap = travelled < GestureThresholds.tapMaxDistance
+            && now - touchStartTime < GestureThresholds.tapMaxTime
+
+        if wasTap && penClickState == 1 {
+            lastTapTime = now
+            lastTapPosition = point
+        } else {
+            // Reset after click 2 as well, so a third tap doesn't ride the same window.
+            lastTapTime = 0
+        }
+        penClickState = 1
     }
 
     /// Releases the left button if a state that holds it down is still active, then resets
@@ -862,6 +889,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard gestureState == .penDrawing || gestureState == .dragging else { return }
         injectMouseUp(at: touchLastPosition)
         gestureState = .idle
+        penClickState = 1
+        lastTapTime = 0
     }
 
     private func oneFingerDown(at point: CGPoint) {
@@ -1095,9 +1124,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func injectMouseDown(at point: CGPoint) {
+    private func injectMouseDown(at point: CGPoint, clickState: Int64 = 1) {
         if let event = CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left) {
-            event.setIntegerValueField(.mouseEventClickState, value: 1)
+            event.setIntegerValueField(.mouseEventClickState, value: clickState)
             event.post(tap: .cghidEventTap)
         }
     }

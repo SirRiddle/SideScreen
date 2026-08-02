@@ -30,6 +30,7 @@ enum GestureState {
     case scrolling        // 1-finger scroll
     case longPressReady   // Long press detected, waiting for drag or release
     case dragging         // Long press + drag (left mouse drag)
+    case penDrawing       // Pen mode: 1-pointer stroke (mouse down on touch, no long press)
     case twoFingerScroll  // 2-finger scroll
     case pinching         // Pinch zoom
 }
@@ -240,6 +241,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         settings.$touchEnabled
             .dropFirst()
             .sink { [weak self] enabled in
+                // Turning touch off mid-stroke drops every later event, up included, so
+                // close the stroke before the events stop flowing.
+                if !enabled { self?.releaseHeldMouseButtonIfNeeded() }
                 self?.streamingServer?.touchEnabled = enabled
             }
             .store(in: &cancellables)
@@ -634,6 +638,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             streamingServer?.onClientDisconnected = { [weak self] in
                 guard let self = self else { return }
                 Task { @MainActor in
+                    // The tablet can vanish mid-stroke (cable pulled, app killed); its
+                    // touch-up will never arrive, so end any open stroke here.
+                    self.releaseHeldMouseButtonIfNeeded()
                     self.settings.clientConnected = false
                     // Final lastConnected snapshot at the disconnect moment, then
                     // freeze (currentWirelessDevice = nil stops the rolling update
@@ -688,6 +695,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func stopServer() {
+        // A stroke can be in flight when the user hits Stop; release before the input
+        // path goes away, or the left button stays down with nothing left to lift it.
+        releaseHeldMouseButtonIfNeeded()
+
         // Save display position before destroying
         virtualDisplayManager?.saveDisplayPosition()
 
@@ -766,6 +777,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         if pointerCount >= 2 {
             handleTwoFingerTouch(p1: p1, p2: p2, action: action)
+        } else if settings.penModeEnabled {
+            // Pen mode: single pointer draws directly. 2-finger gestures above are
+            // untouched, so scroll/pinch still work for panning and zooming a canvas.
+            handlePenTouch(at: p1, action: action)
         } else {
             handleOneFingerTouch(at: p1, action: action)
         }
@@ -780,6 +795,73 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case 2: oneFingerUp(at: point)
         default: break
         }
+    }
+
+    // MARK: - Pen / Draw Mode (1 pointer, direct pointer semantics)
+
+    /// Pen mode maps one pointer straight onto the left mouse button: down → drag → up,
+    /// with no long-press wait and no scroll interpretation, so a stroke produces a
+    /// continuous line in drawing apps. A tap is still a plain click (down + up).
+    private func handlePenTouch(at point: CGPoint, action: Int) {
+        switch action {
+        case 0: penDown(at: point)
+        case 1: penMove(to: point)
+        case 2: penUp(at: point)
+        default: break
+        }
+    }
+
+    private func penDown(at point: CGPoint) {
+        stopMomentumScroll()
+        cancelLongPressTimer()
+        // A previous stroke can still be open if its up event never arrived (client
+        // dropped mid-stroke); never stack two downs without an up in between.
+        releaseHeldMouseButtonIfNeeded()
+
+        touchStartPosition = point
+        touchLastPosition = point
+        gestureState = .penDrawing
+
+        // Park the cursor on the contact point first so the app sees the press where
+        // the pen actually is, then press immediately (no long-press threshold).
+        moveCursor(to: point)
+        injectMouseDown(at: point)
+    }
+
+    private func penMove(to point: CGPoint) {
+        guard gestureState == .penDrawing else { return }
+
+        // Same input-rate cap as the trackpad path (~120Hz); above that the extra
+        // samples only cost CGEvent posts.
+        let now = DispatchTime.now().uptimeNanoseconds
+        if now - lastTouchTime < GestureThresholds.minTouchInterval { return }
+        lastTouchTime = now
+
+        injectMouseDragged(to: point)
+
+        touchLastPosition = point
+    }
+
+    private func penUp(at point: CGPoint) {
+        // .dragging is possible if the mode was switched on mid-stroke — release either way,
+        // a stuck left button would be worse than a lost stroke.
+        guard gestureState == .penDrawing || gestureState == .dragging else { return }
+        // clickState marks this as the release of a complete click, matching the down
+        // event; without it a tap is a half-formed click and controls that act on
+        // mouseUp ignore it.
+        injectMouseUp(at: point, clickState: 1)
+        gestureState = .idle
+    }
+
+    /// Releases the left button if a state that holds it down is still active, then resets
+    /// the gesture. Called whenever a stroke can no longer be finished normally — a second
+    /// finger landing mid-stroke, the client disconnecting, the server stopping, touch input
+    /// being turned off, or the app quitting. Without this the button stays physically down
+    /// and every later cursor move drags across the Mac until the user clicks a real mouse.
+    private func releaseHeldMouseButtonIfNeeded() {
+        guard gestureState == .penDrawing || gestureState == .dragging else { return }
+        injectMouseUp(at: touchLastPosition)
+        gestureState = .idle
     }
 
     private func oneFingerDown(at point: CGPoint) {
@@ -846,7 +928,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 lastScrollDeltaY = sy
             }
 
-        case .dragging:
+        case .dragging, .penDrawing:
+            // .penDrawing only lands here if pen mode was switched off mid-stroke; keep
+            // feeding drags so the button that is still down doesn't sit in one spot.
             injectMouseDragged(to: point)
 
         default:
@@ -900,7 +984,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
-        case .dragging:
+        case .dragging, .penDrawing:
+            // .penDrawing only lands here if the mode was switched off mid-stroke.
             injectMouseUp(at: point)
 
         default:
@@ -918,6 +1003,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         switch action {
         case 0: // Down
+            releaseHeldMouseButtonIfNeeded()
             cancelLongPressTimer()
             stopMomentumScroll()
             gestureState = .idle  // Reset so 2-finger detection starts fresh
@@ -1022,8 +1108,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func injectMouseUp(at point: CGPoint) {
+    /// `clickState` defaults to 0 so the existing drag paths post exactly the event they
+    /// always have; only taps that need to read as a complete click pass 1.
+    private func injectMouseUp(at point: CGPoint, clickState: Int64 = 0) {
         if let event = CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left) {
+            if clickState > 0 {
+                event.setIntegerValueField(.mouseEventClickState, value: clickState)
+            }
             event.post(tap: .cghidEventTap)
         }
     }

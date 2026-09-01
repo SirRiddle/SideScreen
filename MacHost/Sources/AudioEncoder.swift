@@ -23,10 +23,13 @@ final class AudioEncoder {
     private var outChannels: UInt32 = 2
     private var inBytesPerFrame: UInt32 = 0
 
-    private var pcmAccum: [UInt8] = []
+    // Per-plane accumulators: SCK delivers NON-interleaved (planar) Float32 —
+    // one AudioBuffer per channel — while interleaved sources give one buffer.
+    // The AAC converter is fed with the same plane layout the input declares.
+    private var planeAccums: [[UInt8]] = []
     private var accumFrames = 0
 
-    private var inputBytes: [UInt8] = []
+    private var inputPlanes: [[UInt8]] = []
     private var inputProvided = false
 
     func encode(sampleBuffer: CMSampleBuffer) {
@@ -42,7 +45,7 @@ final class AudioEncoder {
                 AudioConverterDispose(c)
                 self.converter = nil
             }
-            self.pcmAccum.removeAll(keepingCapacity: false)
+            self.planeAccums.removeAll()
             self.accumFrames = 0
         }
     }
@@ -63,34 +66,69 @@ final class AudioEncoder {
         }
         guard converter != nil else { return }
 
-        var blockBuffer: CMBlockBuffer?
-        var audioBufferList = AudioBufferList(
-            mNumberBuffers: 1,
-            mBuffers: AudioBuffer(mNumberChannels: inASBD.mChannelsPerFrame, mDataByteSize: 0, mData: nil)
-        )
+        // Two-call sizing: real SCK audio is planar, needing a multi-buffer ABL.
         var sizeNeeded = 0
-        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+        var blockBuffer: CMBlockBuffer?
+        let preflight = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
             sampleBuffer,
             bufferListSizeNeededOut: &sizeNeeded,
-            bufferListOut: &audioBufferList,
-            bufferListSize: MemoryLayout<AudioBufferList>.size,
+            bufferListOut: nil,
+            bufferListSize: 0,
             blockBufferAllocator: kCFAllocatorDefault,
             blockBufferMemoryAllocator: kCFAllocatorDefault,
             flags: 0,
             blockBufferOut: &blockBuffer
         )
-        guard status == noErr, let mData = audioBufferList.mBuffers.mData,
-              audioBufferList.mBuffers.mDataByteSize > 0 else { return }
+        guard preflight == noErr, sizeNeeded > 0 else { return }
 
-        let newBytes = UnsafeBufferPointer(start: mData.assumingMemoryBound(to: UInt8.self),
-                                           count: Int(audioBufferList.mBuffers.mDataByteSize))
-        pcmAccum.append(contentsOf: newBytes)
-        accumFrames += Int(audioBufferList.mBuffers.mDataByteSize) / Int(inBytesPerFrame)
+        let ablStorage = UnsafeMutableRawPointer.allocate(byteCount: sizeNeeded, alignment: 8)
+        defer { ablStorage.deallocate() }
+        let abl = ablStorage.bindMemory(to: AudioBufferList.self, capacity: 1)
+        var blockOut: CMBlockBuffer?
+        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: &sizeNeeded,
+            bufferListOut: abl,
+            bufferListSize: sizeNeeded,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: 0,
+            blockBufferOut: &blockOut
+        )
+        guard status == noErr else { return }
+
+        let buffers = UnsafeMutableAudioBufferListPointer(abl)
+        guard !buffers.isEmpty, let first = buffers.first, first.mData != nil,
+              first.mDataByteSize > 0, inBytesPerFrame > 0 else { return }
+
+        let planes = buffers.map { buf -> [UInt8] in
+            guard let data = buf.mData, buf.mDataByteSize > 0 else { return [] }
+            return Array(UnsafeBufferPointer(start: data.assumingMemoryBound(to: UInt8.self),
+                                             count: Int(buf.mDataByteSize)))
+        }
+        ingest(planes: planes, framesPerBuffer: Int(first.mDataByteSize) / Int(inBytesPerFrame))
+    }
+
+    /// Extraction-independent ingestion (also the unit-test seam): plane-major
+    /// PCM, one array per ABL buffer — one per channel for planar sources, one
+    /// interleaved array otherwise. Queue-confined like the rest of this class.
+    func ingest(planes: [[UInt8]], framesPerBuffer frames: Int) {
+        guard frames > 0, !planes.isEmpty else { return }
+        if planeAccums.count != planes.count {
+            planeAccums = (0..<planes.count).map { _ in [] }
+            accumFrames = 0  // conservative: a layout change drops partial residue
+        }
+        for (i, plane) in planes.enumerated() where !plane.isEmpty {
+            planeAccums[i].append(contentsOf: plane)
+        }
+        accumFrames += frames
 
         while accumFrames >= 1024 {
-            let auByteCount = 1024 * Int(inBytesPerFrame)
-            inputBytes = Array(pcmAccum[0..<auByteCount])
-            pcmAccum.removeFirst(auByteCount)
+            let auPlaneByteCount = 1024 * Int(inBytesPerFrame)
+            inputPlanes = planeAccums.map { Array($0[0..<auPlaneByteCount]) }
+            for i in planeAccums.indices {
+                planeAccums[i] = Array(planeAccums[i].dropFirst(auPlaneByteCount))
+            }
             accumFrames -= 1024
             if let encoded = encodeAccessUnit() {
                 onEncodedAccessUnit?(encoded, DispatchTime.now().uptimeNanoseconds)
@@ -99,7 +137,7 @@ final class AudioEncoder {
     }
 
     private func encodeAccessUnit() -> Data? {
-        guard let converter, !inputBytes.isEmpty else { return nil }
+        guard let converter, !inputPlanes.isEmpty else { return nil }
         inputProvided = false
 
         let outCapacity = 4096
@@ -124,15 +162,19 @@ final class AudioEncoder {
                     return noErr
                 }
                 encoder.inputProvided = true
-                encoder.inputBytes.withUnsafeBytes { raw in
-                    ioData.pointee.mNumberBuffers = 1
-                    ioData.pointee.mBuffers.mData = UnsafeMutableRawPointer(mutating: raw.baseAddress)
-                    ioData.pointee.mBuffers.mDataByteSize = UInt32(encoder.inputBytes.count)
+                let list = UnsafeMutableAudioBufferListPointer(ioData)
+                ioData.pointee.mNumberBuffers = UInt32(encoder.inputPlanes.count)
+                for (i, plane) in encoder.inputPlanes.enumerated() {
+                    plane.withUnsafeBytes { raw in
+                        list[i].mData = UnsafeMutableRawPointer(mutating: raw.baseAddress)
+                        list[i].mDataByteSize = UInt32(plane.count)
+                        list[i].mNumberChannels = encoder.inputPlanes.count > 1 ? 1 : encoder.outChannels
+                    }
                 }
                 if let outDataPacketDescription {
                     outDataPacketDescription.pointee = nil
                 }
-                ioNumberDataPackets.pointee = UInt32(encoder.inputBytes.count) / max(1, encoder.inBytesPerFrame)
+                ioNumberDataPackets.pointee = UInt32(encoder.inputPlanes.isEmpty ? 0 : encoder.inputPlanes[0].count / max(1, Int(encoder.inBytesPerFrame)))
                 return noErr
             },
             ctx,
@@ -145,6 +187,22 @@ final class AudioEncoder {
         let aac = Data(bytes: outStorage, count: Int(outBufferList.mBuffers.mDataByteSize))
         return Self.addADTSHeader(to: aac, sampleRate: outSampleRate, channels: outChannels)
     }
+    /// Test hook: build the converter exactly as _encode would for the given
+    /// layout. Internal probe seam — not part of the runtime contract.
+    func probeConfigure(sampleRate: Double, channels: Int, interleaved: Bool) {
+        queue.sync {
+            var flags: AudioFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked
+            if !interleaved { flags |= kAudioFormatFlagIsNonInterleaved }
+            let bpf = UInt32(interleaved ? 4 * channels : 4)
+            let asbd = AudioStreamBasicDescription(
+                mSampleRate: sampleRate, mFormatID: kAudioFormatLinearPCM,
+                mFormatFlags: flags, mBytesPerPacket: bpf, mFramesPerPacket: 1,
+                mBytesPerFrame: bpf, mChannelsPerFrame: UInt32(channels),
+                mBitsPerChannel: 32, mReserved: 0)
+            inBytesPerFrame = bpf
+            rebuildConverter(input: asbd)
+        }
+    }
 
     private func rebuildConverter(input inASBD: AudioStreamBasicDescription) {
         if let converter {
@@ -155,7 +213,7 @@ final class AudioEncoder {
         inBytesPerFrame = inASBD.mBytesPerFrame
         outSampleRate = inASBD.mSampleRate
         outChannels = min(2, max(1, inASBD.mChannelsPerFrame))
-        pcmAccum.removeAll(keepingCapacity: true)
+        planeAccums.removeAll()
         accumFrames = 0
 
         var outASBD = AudioStreamBasicDescription(

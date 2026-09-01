@@ -1782,8 +1782,16 @@ class MainActivity : AppCompatActivity() {
 
         // Check Mac Server (try to connect to port)
         lifecycleScope.launch(Dispatchers.IO) {
-            // Double-check connection state before socket test
-            if (isConnected) return@launch
+            // While streaming the checklist is stale by definition — a probe
+            // would also steal the single client slot. Report connected state.
+            if (isConnected) {
+                runOnUiThread {
+                    updateChecklistItem(binding.checkMacServer, true)
+                    updateMainStatus(true)
+                    binding.statusText.text = "Connected - Streaming active"
+                }
+                return@launch
+            }
 
             val port =
                 binding.portInput.text
@@ -1852,10 +1860,16 @@ class MainActivity : AppCompatActivity() {
         var socket: Socket? = null
         return try {
             socket = Socket()
-            socket.connect(InetSocketAddress(host, port), 300) // 300ms connect timeout
-            socket.soTimeout = 200 // 200ms read timeout
+            socket.connect(InetSocketAddress(host, port), 400) // connect timeout
+            socket.soTimeout = 700 // read timeout: advert window + adb hop + scheduling slack
 
-            // Try to read - Mac server sends display config immediately
+            // Speak first: sending the metadata opt-in (type 8) makes the Mac
+            // answer with its display config immediately, no 100ms advert window
+            // to outrun. An adb daemon (or anything else) understands nothing.
+            socket.getOutputStream().write(byteArrayOf(8))
+            socket.getOutputStream().flush()
+
+            // Try to read - real Mac server replies with a display config frame.
             // ADB daemon doesn't send anything, so read will timeout
             val input = socket.getInputStream()
             val firstByte = input.read() // Blocks up to soTimeout

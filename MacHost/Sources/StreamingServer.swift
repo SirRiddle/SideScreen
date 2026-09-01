@@ -174,6 +174,7 @@ class StreamingServer {
     private static let maxFrameSendAgeNs: UInt64 = 250_000_000
     private static let backlogRecoveryCooldownNs: UInt64 = 500_000_000
     private var lastBacklogRecoveryNs: UInt64 = 0
+    private var didLogFirstAudioSend = false
     // Whether host wants to receive touch events from client. Ping/pong is
     // handled regardless. When false, incoming touch frames are dropped
     // immediately without parsing or dispatching to main queue.
@@ -876,6 +877,10 @@ class StreamingServer {
         guard let connection = connection, !isStopped, connectionReady, clientSupportsAudio else { return }
         frameQueue.async { [weak self] in
             guard let self = self else { return }
+            if !self.didLogFirstAudioSend {
+                self.didLogFirstAudioSend = true
+                debugLog("First audio frame sent to client (\(adts.count) bytes)")
+            }
             var packet = Data(capacity: adts.count + 14)
             packet.append(WireMessage.audioFrame)
             self.appendFrameSize(adts.count, to: &packet)

@@ -32,6 +32,7 @@ class ScreenCapture {
     private var streamDelegate: StreamDelegate?
     private var encoder: VideoEncoder?
     private let audioEncoder = AudioEncoder()
+    private var didLogFirstAudioAU = false
     /// Mirrors Settings.audioOutput == "tablet" — gates SCK audio capture +
     /// encode. Toggle is applied live via updateConfiguration, no restart.
     private(set) var audioEnabled = false
@@ -484,7 +485,11 @@ class ScreenCapture {
         // Always armed: SCK only delivers audio while capturesAudio=true, and the
         // server gates sends on the client's type-15 advert — so this is inert
         // until the user picks Tablet output.
-        audioEncoder.onEncodedAccessUnit = { [weak server] data, timestamp in
+        audioEncoder.onEncodedAccessUnit = { [weak server, weak self] data, timestamp in
+            if let self, !self.didLogFirstAudioAU {
+                self.didLogFirstAudioAU = true
+                debugLog("AudioEncoder emitted first AU (\(data.count) bytes) — forwarding to server")
+            }
             server?.sendAudio(data, timestamp: timestamp)
         }
 

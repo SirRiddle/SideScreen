@@ -349,7 +349,7 @@ class ScreenCapture {
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         config.showsCursor = true
-        config.queueDepth = 2
+        config.queueDepth = 4
         config.capturesAudio = false
         config.backgroundColor = .clear
         config.scalesToFit = false
@@ -393,11 +393,9 @@ class ScreenCapture {
 
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
-            // Backpressure: skip if encode queue already has a frame pending — a second slot would only
-            // hold stale video (VT RealTime drops internally anyway, so the extra
-            // buffer bought latency, not resilience)
+            // Backpressure: skip if encode queue already has 2+ frames pending
             let pending = OSAtomicAdd32(0, &self.pendingEncodes)
-            if pending >= 1 {
+            if pending >= 2 {
                 return
             }
 

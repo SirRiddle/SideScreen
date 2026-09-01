@@ -25,6 +25,13 @@ private enum WireMessage {
     /// Client→server, payload-free: "I understand desktopGeometry, and I read
     /// displayConfig as the encoded stream size."
     static let clientSupportsDesktopGeometry: UInt8 = 12
+    /// Client→server, payload-free RFC 4648-style opt-in (old hosts consume 1
+    /// byte safely): the client can decode+play AAC ADTS audio frames.
+    static let clientSupportsAudio: UInt8 = 15
+    /// Server→client: [14][BE32 size][1B flags][BE64 capture ns][AAC ADTS].
+    /// Sent ONLY to clients that sent clientSupportsAudio (old clients
+    /// hard-disconnect on unknown types).
+    static let audioFrame: UInt8 = 14
     /// Server→client, 8-byte payload: the logical desktop size, for display
     /// only. Sent ONLY to clients that sent clientSupportsDesktopGeometry —
     /// older clients disconnect on unknown message types.
@@ -237,6 +244,7 @@ class StreamingServer {
     private(set) var clientDecodeLimits: (width: Int, height: Int)?
     /// Set when the client opts in via type 12. Gates desktopGeometry sends.
     private var clientSupportsDesktopGeometry = false
+    private var clientSupportsAudio = false
     /// Logical desktop size, reported alongside the encoded size for display.
     private var desktopWidth = 0
     private var desktopHeight = 0
@@ -348,6 +356,7 @@ class StreamingServer {
         clientIsAvcOnly = false
         clientDecodeLimits = nil
         clientSupportsDesktopGeometry = false
+        clientSupportsAudio = false
         waitingForSyncFrame = true
         inputBuffer.removeAll(keepingCapacity: true)
         connection = newConnection
@@ -767,6 +776,15 @@ class StreamingServer {
                     debugLog("Client reads displayConfig as the encoded size")
                 }
 
+            case WireMessage.clientSupportsAudio:
+                // Payload-free opt-in (same convention as 8/9/12); gates
+                // audioFrame sends. Placed with siblings BEFORE type 8.
+                consumeInputBytes(1)
+                if !clientSupportsAudio {
+                    clientSupportsAudio = true
+                    debugLog("Client supports audio playback")
+                }
+
             default:
                 debugLog("Unknown client input type: \(msgType)")
                 consumeInputBytes(1)
@@ -848,6 +866,25 @@ class StreamingServer {
         guard now &- lastBacklogRecoveryNs > Self.backlogRecoveryCooldownNs else { return }
         lastBacklogRecoveryNs = now
         onBacklogRecoveryNeeded?()
+    }
+
+    /// Send one ADTS-framed AAC access unit. Same header layout as a metadata
+    /// video frame ([type][BE32 size][1B flags][BE64 capture ns][payload]) so
+    /// the client parses both with one code path. Audio is never age-dropped:
+    /// AUs are ~350B at 128kbps — dropping risks audible gaps for zero gain.
+    func sendAudio(_ adts: Data, timestamp: UInt64) {
+        guard let connection = connection, !isStopped, connectionReady, clientSupportsAudio else { return }
+        frameQueue.async { [weak self] in
+            guard let self = self else { return }
+            var packet = Data(capacity: adts.count + 14)
+            packet.append(WireMessage.audioFrame)
+            self.appendFrameSize(adts.count, to: &packet)
+            packet.append(0)  // flags (reserved)
+            var captureTimestamp = timestamp.bigEndian
+            withUnsafeBytes(of: &captureTimestamp) { packet.append(contentsOf: $0) }
+            packet.append(adts)
+            connection.send(content: packet, completion: .contentProcessed { _ in })
+        }
     }
 
     private func makeFramePacket(_ data: Data, timestamp: UInt64, isKeyframe: Bool) -> Data {

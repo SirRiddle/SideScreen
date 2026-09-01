@@ -261,6 +261,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.cancelActiveRemoteGesture()
             }
             .store(in: &cancellables)
+        settings.$audioOutput
+            .dropFirst()
+            .sink { [weak self] output in
+                self?.screenCapture?.setAudioEnabled(output == "tablet")
+            }
+            .store(in: &cancellables)
 
         // Observer cho connection mode changes — restart server with new auth/ADB policy.
         settings.$connectionMode
@@ -719,6 +725,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 )
             }
             try await server.start()
+            // Audio routing setting (Mac speakers ⇄ tablet): armed before start
+            // so capturesAudio is correct in the initial stream configuration.
+            screenCapture?.setAudioEnabled(settings.audioOutput == "tablet")
             screenCapture?.startStreaming(
                 to: server,
                 bitrateMbps: settings.effectiveBitrate,

@@ -34,6 +34,9 @@ class StreamClient(
     var onConnectionStatus: ((Boolean) -> Unit)? = null
     var onDisplaySize: ((Int, Int, Int, Boolean, Boolean) -> Unit)? = null
 
+    /** Raw ADTS-framed AAC AU straight off the wire; fired on the receive thread. */
+    var onAudioFrame: ((ByteArray, Int) -> Unit)? = null
+
     /** Logical desktop size behind the stream. Display only; never size the decoder from it. */
     var onDesktopSize: ((Int, Int) -> Unit)? = null
     var onStats: ((Double, Double) -> Unit)? = null
@@ -153,6 +156,7 @@ class StreamClient(
                 advertiseAvcOnlyIfNeeded() // MUST precede type 8: type 8 can trigger the server's early protocol finish
                 advertiseDecoderLimits() // Also before type 8, for the same reason
                 advertiseDesktopGeometrySupport() // Likewise
+                advertiseAudioSupport() // Same ordering rule: must precede type 8
                 advertiseFrameMetadataSupport()
                 isConnected = true
                 lastKeyframeReceivedNs = 0L
@@ -377,6 +381,7 @@ class StreamClient(
                 advertiseAvcOnlyIfNeeded() // MUST precede type 8: type 8 can trigger the server's early protocol finish
                 advertiseDecoderLimits() // Also before type 8, for the same reason
                 advertiseDesktopGeometrySupport() // Likewise
+                advertiseAudioSupport() // Same ordering rule: must precede type 8
                 advertiseFrameMetadataSupport()
                 isConnected = true
                 diagLog("Wireless connected to $host:$port")
@@ -405,6 +410,14 @@ class StreamClient(
             out.writeByte(MESSAGE_CLIENT_SUPPORTS_DESKTOP_GEOMETRY)
             out.flush()
             diagLog("Advertised desktop-geometry support")
+        }
+    }
+
+    private fun advertiseAudioSupport() {
+        outputStream?.let { out ->
+            out.writeByte(MESSAGE_CLIENT_SUPPORTS_AUDIO)
+            out.flush()
+            diagLog("Advertised audio playback support")
         }
     }
 
@@ -487,6 +500,19 @@ class StreamClient(
                             val sentTime = ByteBuffer.wrap(buf).order(ByteOrder.LITTLE_ENDIAN).long
                             val rtt = (System.nanoTime() - sentTime) / 1_000_000.0 // ms
                             onLatencyMeasured?.invoke(rtt)
+                        }
+
+                        MESSAGE_AUDIO_FRAME -> {
+                            // Mirrors receiveVideoFrame(hasMetadata=true): size, flags, stamp.
+                            val audioSize = input.readInt()
+                            if (audioSize <= 0 || audioSize > 262_144) {
+                                throw IOException("Invalid audio frame size: $audioSize")
+                            }
+                            input.readByte() // flags (reserved)
+                            input.readLong() // capture ns — Mac uptime clock, not comparable here
+                            val au = ByteArray(audioSize)
+                            input.readFully(au)
+                            onAudioFrame?.invoke(au, audioSize)
                         }
 
                         MESSAGE_DESKTOP_GEOMETRY -> {
@@ -756,6 +782,12 @@ class StreamClient(
         private const val MESSAGE_CLIENT_DECODER_LIMITS = 11
         private const val MESSAGE_CLIENT_SUPPORTS_DESKTOP_GEOMETRY = 12
         private const val MESSAGE_DESKTOP_GEOMETRY = 13
+
+        /** Server→client: [14][BE32 size][1B flags][BE64 capture ns][AAC ADTS]. */
+        private const val MESSAGE_AUDIO_FRAME = 14
+
+        /** Client→server, payload-free opt-in (old hosts skip 1 byte safely). */
+        private const val MESSAGE_CLIENT_SUPPORTS_AUDIO = 15
         private const val FRAME_FLAG_KEYFRAME = 1
         private const val KEYFRAME_REQUEST_FLAG_FORCE = 1
 

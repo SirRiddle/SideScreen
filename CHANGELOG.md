@@ -9,17 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- **Pen / Draw Mode.** New toggle under Touch Control on the Mac. With it on, a single pointer presses the left button the moment it touches down instead of waiting out the long-press threshold, so a stylus draws a continuous stroke in drawing apps rather than scrolling the canvas. Two-finger scroll and pinch are unchanged, so panning and zooming still work. Off by default — every existing gesture behaves exactly as before unless it is enabled. This is direct-pointer input only: the touch protocol carries no pressure or tilt, so it does not close out the planned full stylus support.
-
-### Fixed
-- **Left mouse button could stay stuck down.** A drag that never received its touch-up — client disconnected, server stopped, touch input switched off, or the app quit mid-drag — left the left button physically pressed, so every later cursor movement dragged across the Mac until a real mouse was clicked. All of those paths now release the button. Rare with long-press dragging, but constant once Pen / Draw Mode makes a held button the normal state of every stroke.
-
 ### Planned
 - mDNS auto-discovery for wireless mode
 - Audio streaming
 - Multi-touch gestures
 - Stylus/pen support
+
+---
+
+<a id="0.12.0"></a>
+## [0.12.0] - 2026-09-01
+
+Fork release (SirRiddle/SideScreen): seven upstream PRs landed ahead of upstream, plus a latency pass end-to-end. Highlights: Pen/Draw Mode, HiDPI scaling options in macOS display settings, honest stream sizes on the wire, decoder-aware bounds, and a bounded video pipeline that can no longer fall seconds behind under WiFi congestion.
+
+### Added
+- **Pen / Draw Mode (#51).** New toggle under Touch Control on the Mac. With it on, a single pointer presses the left button the moment it touches down instead of waiting out the long-press threshold, so a stylus draws a continuous stroke in drawing apps rather than scrolling the canvas. Two-finger scroll and pinch are unchanged. Off by default. Direct-pointer input only: the touch protocol carries no pressure or tilt. Contributed by @crsxmd.
+- **HiDPI scaling ladder (#63).** HiDPI virtual displays now register a ladder of logical modes, so macOS System Settings offers the "Larger Text … More Space" scaling picker for the tablet display, like a built-in Retina panel. Contributed by @meta-boy.
+- **Responsive landscape settings dialog on Android (#58).** The settings dialog renders as a proper two-column layout in landscape and survives rotation instead of resetting. Contributed by @ryancooper73.
+- **True stream size on the wire (#64).** The display config message now carries the actual encoded stream size; the logical desktop size travels separately to clients that opt in (protocol types 12/13, backward compatible in both directions). Touch mapping and overlay stats use the truthful size. Contributed by @meta-boy.
+
+### Fixed
+- **Left mouse button could stay stuck down (#46).** A drag that never received its touch-up — client disconnected, server stopped, touch input switched off, or the app quit mid-drag — left the left button physically pressed, so every later cursor movement dragged across the Mac until a real mouse was clicked. All of those paths now release the button (unified with Pen mode's stroke handling). Contributed by @franekmat.
+- **Unreliable server startup (#57).** Starting the stream is now failure-atomic: the listener reports definitively ready/failed (10s timeout, EADDRINUSE detected), and a failed start tears down capture/server/virtual-display state instead of leaking a wedged half-started session. Contributed by @cwy433-png.
+- **Stream size bounded by what the tablet can decode (#62).** The Mac now clamps the stream to the client's *sustainable* decode size (verified via `areSizeAndRateSupported`, orientation-aware), not merely the advertised ceiling. Contributed by @meta-boy.
+
+### Performance
+- **Bounded pipeline latency under congestion.** The Mac now drops non-keyframes older than 250ms instead of letting the socket buffer them unboundedly (previously latency could grow by seconds with no recovery), then requests a fresh keyframe to resync cleanly.
+- **Tighter queues.** Encode backpressure 2→1 pending frame and capture queue depth 4→2 on the Mac remove up to ~50ms of stale-frame worst case per stage.
+- **Truthful latency stats.** Frame age is stamped when a frame is captured, not when encoding starts — the readouts now include vsync wait, capture queue, and encode backlog.
+- **WiFi QoS.** The stream socket is marked interactive-video class (DSCP/WMM), cutting queueing jitter on busy networks.
+- **High-refresh panels actually run high-refresh.** Android requests the panel's highest-refresh mode while streaming — 90/120Hz tablets no longer present at 60Hz — and the frame receive loop moves to a display-priority thread, killing multi-ms scheduling spikes.
+- **Smarter touch prediction.** Velocity now comes from event timestamps (not UI-thread time), direction reversals no longer overshoot, and the prediction horizon adapts to measured RTT + decoder latency instead of a fixed 12ms.
+- **Decoder stall self-heals.** A stalled decoder (black screen with live stats) now rebuilds itself and requests a fresh keyframe once per session before showing any error toast.
+
+### Installation
+- **macOS (manual)**: Open `SideScreen-0.12.0-mac-universal.dmg`, drag SideScreen to Applications. If Gatekeeper says "damaged"/"cannot be opened": `sudo xattr -cr /Applications/SideScreen.app`. Requires macOS 13 (Ventura) or later.
+- **Android**: Install `SideScreen-0.12.0-android.apk` (enable "Unknown sources" if needed).
 
 ---
 

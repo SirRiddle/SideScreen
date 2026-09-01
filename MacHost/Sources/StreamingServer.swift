@@ -22,16 +22,14 @@ private enum WireMessage {
     /// #41). Every payload byte has the high bit set, so old hosts that
     /// consume unknown types byte-by-byte skip the payload harmlessly.
     static let clientDecoderLimits: UInt8 = 11
+    /// RETIRED (never reuse): 14/15 were the withdrawn audio-streaming v1
+    /// (0.12.1). 0.12.1 clients hard-disconnect on unknown server types and
+    /// 0.12.1 servers byte-skip unknown client types, so both directions are
+    /// poisoned against resurrecting those numbers with a different meaning.
+
     /// Client→server, payload-free: "I understand desktopGeometry, and I read
     /// displayConfig as the encoded stream size."
     static let clientSupportsDesktopGeometry: UInt8 = 12
-    /// Client→server, payload-free RFC 4648-style opt-in (old hosts consume 1
-    /// byte safely): the client can decode+play AAC ADTS audio frames.
-    static let clientSupportsAudio: UInt8 = 15
-    /// Server→client: [14][BE32 size][1B flags][BE64 capture ns][AAC ADTS].
-    /// Sent ONLY to clients that sent clientSupportsAudio (old clients
-    /// hard-disconnect on unknown types).
-    static let audioFrame: UInt8 = 14
     /// Server→client, 8-byte payload: the logical desktop size, for display
     /// only. Sent ONLY to clients that sent clientSupportsDesktopGeometry —
     /// older clients disconnect on unknown message types.
@@ -174,7 +172,6 @@ class StreamingServer {
     private static let maxFrameSendAgeNs: UInt64 = 250_000_000
     private static let backlogRecoveryCooldownNs: UInt64 = 500_000_000
     private var lastBacklogRecoveryNs: UInt64 = 0
-    private var didLogFirstAudioSend = false
     // Whether host wants to receive touch events from client. Ping/pong is
     // handled regardless. When false, incoming touch frames are dropped
     // immediately without parsing or dispatching to main queue.
@@ -245,7 +242,6 @@ class StreamingServer {
     private(set) var clientDecodeLimits: (width: Int, height: Int)?
     /// Set when the client opts in via type 12. Gates desktopGeometry sends.
     private var clientSupportsDesktopGeometry = false
-    private var clientSupportsAudio = false
     /// Logical desktop size, reported alongside the encoded size for display.
     private var desktopWidth = 0
     private var desktopHeight = 0
@@ -357,7 +353,6 @@ class StreamingServer {
         clientIsAvcOnly = false
         clientDecodeLimits = nil
         clientSupportsDesktopGeometry = false
-        clientSupportsAudio = false
         waitingForSyncFrame = true
         inputBuffer.removeAll(keepingCapacity: true)
         connection = newConnection
@@ -777,15 +772,6 @@ class StreamingServer {
                     debugLog("Client reads displayConfig as the encoded size")
                 }
 
-            case WireMessage.clientSupportsAudio:
-                // Payload-free opt-in (same convention as 8/9/12); gates
-                // audioFrame sends. Placed with siblings BEFORE type 8.
-                consumeInputBytes(1)
-                if !clientSupportsAudio {
-                    clientSupportsAudio = true
-                    debugLog("Client supports audio playback")
-                }
-
             default:
                 debugLog("Unknown client input type: \(msgType)")
                 consumeInputBytes(1)
@@ -867,29 +853,6 @@ class StreamingServer {
         guard now &- lastBacklogRecoveryNs > Self.backlogRecoveryCooldownNs else { return }
         lastBacklogRecoveryNs = now
         onBacklogRecoveryNeeded?()
-    }
-
-    /// Send one ADTS-framed AAC access unit. Same header layout as a metadata
-    /// video frame ([type][BE32 size][1B flags][BE64 capture ns][payload]) so
-    /// the client parses both with one code path. Audio is never age-dropped:
-    /// AUs are ~350B at 128kbps — dropping risks audible gaps for zero gain.
-    func sendAudio(_ adts: Data, timestamp: UInt64) {
-        guard let connection = connection, !isStopped, connectionReady, clientSupportsAudio else { return }
-        frameQueue.async { [weak self] in
-            guard let self = self else { return }
-            if !self.didLogFirstAudioSend {
-                self.didLogFirstAudioSend = true
-                debugLog("First audio frame sent to client (\(adts.count) bytes)")
-            }
-            var packet = Data(capacity: adts.count + 14)
-            packet.append(WireMessage.audioFrame)
-            self.appendFrameSize(adts.count, to: &packet)
-            packet.append(0)  // flags (reserved)
-            var captureTimestamp = timestamp.bigEndian
-            withUnsafeBytes(of: &captureTimestamp) { packet.append(contentsOf: $0) }
-            packet.append(adts)
-            connection.send(content: packet, completion: .contentProcessed { _ in })
-        }
     }
 
     private func makeFramePacket(_ data: Data, timestamp: UInt64, isKeyframe: Bool) -> Data {

@@ -9,9 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **Audio output experiment withdrawn.** The 0.12.1 "Audio Output" toggle (SCK app-audio capture + an in-progress HAL virtual audio driver) never reached a working, shippable state; the entire audio path — toggle, capture, wire types 14/15 (retired, never reusable), and Android player — is removed. Audio plays on the Mac, as before 0.12.1.
+
 ### Planned
 - mDNS auto-discovery for wireless mode
-- Audio streaming
 - Multi-touch gestures
 - Stylus/pen support
 

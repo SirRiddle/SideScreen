@@ -25,41 +25,9 @@ private class StreamDelegate: NSObject, SCStreamDelegate {
 
 class ScreenCapture {
     private var stream: SCStream?
-    /// Retained so the audio toggle can mutate capturesAudio via
-    /// updateConfiguration(_:) without rebuilding every other field.
-    private var streamConfig: SCStreamConfiguration?
     private var streamOutput: StreamOutput?
     private var streamDelegate: StreamDelegate?
     private var encoder: VideoEncoder?
-    private let audioEncoder = AudioEncoder()
-    private var didLogFirstAudioAU = false
-    /// Mirrors Settings.audioOutput == "tablet" — gates SCK audio capture +
-    /// encode. Toggle is applied live via updateConfiguration, no restart.
-    private(set) var audioEnabled = false
-
-    /// Enable/disable audio capture + encode while streaming (or arm it at start).
-    /// SCK delivery follows config.capturesAudio; output attachment is permanent
-    /// (see setupStream) so no restart is needed either direction.
-    func setAudioEnabled(_ enabled: Bool) {
-        guard enabled != audioEnabled else { return }
-        audioEnabled = enabled
-        // Always write the retained config: arming before Start would otherwise
-        // be silently lost (the stream is created before streaming begins).
-        streamConfig?.capturesAudio = enabled
-        guard isStreaming, let stream else { return }
-        Task { [stream] in
-            do {
-                // updateConfiguration takes the config OBJECT (not a closure):
-                // mutate the retained instance in place.
-                guard let cfg = streamConfig else { return }
-                cfg.capturesAudio = enabled
-                try await stream.updateConfiguration(cfg)
-                debugLog("Audio capture toggled: \(enabled)")
-            } catch {
-                debugLog("Audio toggle failed: \(error.localizedDescription)")
-            }
-        }
-    }
     private var display: SCDisplay?
     private var virtualDisplayID: CGDirectDisplayID?
     private var refreshRate: Int = 60
@@ -382,19 +350,11 @@ class ScreenCapture {
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         config.showsCursor = true
         config.queueDepth = 4
-        config.capturesAudio = audioEnabled
         config.backgroundColor = .clear
         config.scalesToFit = false
 
-        streamConfig = config
         let scStream = SCStream(filter: filter, configuration: config, delegate: delegate)
         try scStream.addStreamOutput(output, type: .screen, sampleHandlerQueue: .global(qos: .userInteractive))
-        // The audio output is always attached (SCK won't deliver while
-        // capturesAudio=false) so the Mac-speakers ⇄ tablet toggle can flip
-        // mid-session via updateConfiguration alone, with no stream restart.
-        // Lower priority than video so the audio converter can never back up
-        // frame delivery.
-        try scStream.addStreamOutput(output, type: .audio, sampleHandlerQueue: .global(qos: .utility))
 
         stream = scStream
         debugLog("Stream configured: \(width)x\(height) @ \(fps)fps (with delegate)")
@@ -407,10 +367,6 @@ class ScreenCapture {
         encodeQueue = queue
         pendingEncodes = 0
         lastPixelBuffer = nil
-
-        streamOutput?.onAudioReceived = { [weak self] sampleBuffer in
-            self?.audioEncoder.encode(sampleBuffer: sampleBuffer)
-        }
 
         streamOutput?.onFrameReceived = { [weak self] sampleBuffer in
             guard let self = self else { return }
@@ -482,17 +438,6 @@ class ScreenCapture {
         encoder?.onEncodedFrame = { [weak server] data, timestamp, isKeyframe in
             server?.sendFrame(data, timestamp: timestamp, isKeyframe: isKeyframe)
         }
-        // Always armed: SCK only delivers audio while capturesAudio=true, and the
-        // server gates sends on the client's type-15 advert — so this is inert
-        // until the user picks Tablet output.
-        audioEncoder.onEncodedAccessUnit = { [weak server, weak self] data, timestamp in
-            if let self, !self.didLogFirstAudioAU {
-                self.didLogFirstAudioAU = true
-                debugLog("AudioEncoder emitted first AU (\(data.count) bytes) — forwarding to server")
-            }
-            server?.sendAudio(data, timestamp: timestamp)
-        }
-
         // Apply any keyframe request that arrived before the encoder existed
         let shouldForceInitialKeyframe = keyframeRequestLock.withLock { state -> Bool in
             guard state.pendingEncoderCreationRequest else { return false }
@@ -513,14 +458,6 @@ class ScreenCapture {
 
         Task {
             do {
-                if audioEnabled, let cfg = streamConfig, let stream {
-                    // updateConfiguration is unconditional: the retained config
-                    // object is our copy — only this call pushes it into the
-                    // stream, and skipping it silently zeroes the audio path.
-                    cfg.capturesAudio = true
-                    try await stream.updateConfiguration(cfg)
-                    debugLog("Audio capture enabled at start (updateConfiguration)")
-                }
                 try await stream?.startCapture()
                 debugLog("SCStream capture started — starting frame flow monitor (3s interval, 5s timeout)")
                 startFrameMonitor()
@@ -721,7 +658,6 @@ class ScreenCapture {
 
         // Stop SCStream synchronously (nil out output first to prevent new frames)
         streamOutput?.onFrameReceived = nil
-        streamOutput?.onAudioReceived = nil
         Task {
             try? await stream?.stopCapture()
             stream = nil
@@ -885,16 +821,10 @@ class ScreenCapture {
 
 class StreamOutput: NSObject, SCStreamOutput {
     var onFrameReceived: ((CMSampleBuffer) -> Void)?
-    var onAudioReceived: ((CMSampleBuffer) -> Void)?
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        switch type {
-        case .screen:
-            onFrameReceived?(sampleBuffer)
-        case .audio:
-            onAudioReceived?(sampleBuffer)
-        default:
-            break
-        }
+        guard type == .screen else { return }
+        onFrameReceived?(sampleBuffer)
     }
+
 }

@@ -678,27 +678,6 @@ struct SettingsView: View {
 
                         // Streaming Settings
                         FrostedGroupBox(title: "Streaming Settings", icon: "antenna.radiowaves.left.and.right") {
-                            // Audio output routing
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("Audio Output")
-                                            .font(.system(size: 11))
-                                        Text("Audio of apps on the SideScreen display plays here. Your Mac's own speakers are not muted.")
-                                            .font(.system(size: 9))
-                                            .foregroundColor(.secondary)
-                                    }
-                                    Spacer()
-                                    Picker("", selection: $settings.audioOutput) {
-                                        Text("Mac").tag("mac")
-                                        Text("Tablet").tag("tablet")
-                                    }
-                                    .pickerStyle(.segmented)
-                                    .frame(width: 150)
-                                    .labelsHidden()
-                                }
-                            }
-
                             VStack(alignment: .leading, spacing: 16) {
                                 // Bitrate
                                 VStack(alignment: .leading, spacing: 10) {
@@ -725,6 +704,12 @@ struct SettingsView: View {
                                                 BitrateButton(label: "\(value)", value: value, currentValue: settings.bitrate, disabled: settings.gamingBoost) {
                                                     settings.bitrate = value
                                                 }
+                                            }
+                                            // "Max" = slider/programmatic ceiling; the encoder
+                                            // clamps internally beyond what silicon sustains, so
+                                            // pinning here is honest rather than chasing the number.
+                                            BitrateButton(label: "Max", value: 5000, currentValue: settings.bitrate, disabled: settings.gamingBoost) {
+                                                settings.bitrate = 5000
                                             }
                                         }
                                     }
@@ -1224,11 +1209,6 @@ class DisplaySettings: ObservableObject {
     @Published var bitrate: Int {
         didSet { save("bitrate", bitrate) }
     }
-    /// Where audio of apps on the virtual display is heard: "mac" (default —
-    /// nothing streamed) or "tablet" (AAC over the wire to the client).
-    @Published var audioOutput: String {
-        didSet { save("audioOutput", audioOutput) }
-    }
     @Published var quality: String {
         didSet { save("quality", quality) }
     }
@@ -1300,7 +1280,6 @@ class DisplaySettings: ObservableObject {
         self.refreshRate = defaults.object(forKey: keyPrefix + "refreshRate") as? Int ?? 60  // Default: 60 — balanced for most tablets. 120 may saturate high-res panel pipelines.
         self.hiDPI = defaults.bool(forKey: keyPrefix + "hiDPI")
         self.bitrate = defaults.object(forKey: keyPrefix + "bitrate") as? Int ?? 1000  // Default: 1000 Mbps
-        self.audioOutput = defaults.string(forKey: keyPrefix + "audioOutput") ?? "mac"
         self.quality = defaults.string(forKey: keyPrefix + "quality") ?? "ultralow"  // Default: fastest encoding
         self.gamingBoost = defaults.bool(forKey: keyPrefix + "gamingBoost")
         // Default port 54321 (was 8888 in <=0.7.1; 8888 collides with jupyter/splunk/HP printers).
@@ -1382,7 +1361,7 @@ class DisplaySettings: ObservableObject {
 
     func resetToDefaults() {
         let keys = ["resolution", "refreshRate", "hiDPI", "bitrate", "quality",
-                    "gamingBoost", "port", "audioOutput", "rotation", "flipHorizontal", "flipVertical", "showAllResolutions",
+                    "gamingBoost", "port", "rotation", "flipHorizontal", "flipVertical", "showAllResolutions",
                     "customWidth", "customHeight", "touchEnabled", "penModeEnabled",
                     "autoStartStreamingOnLaunch", "startupMode"]
         for key in keys {
@@ -1393,7 +1372,6 @@ class DisplaySettings: ObservableObject {
         refreshRate = 120  // Default: highest FPS
         hiDPI = false
         bitrate = 1000  // Default: 1000 Mbps
-        audioOutput = "mac"
         quality = "ultralow"  // Default: fastest encoding
         gamingBoost = false
         port = 54321

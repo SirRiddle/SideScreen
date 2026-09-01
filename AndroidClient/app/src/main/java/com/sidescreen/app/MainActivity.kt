@@ -88,9 +88,6 @@ class MainActivity : AppCompatActivity() {
     /** Once-per-session guard for the decoder-stall auto-recovery path. */
     private var stallRecoveryAttempted = false
 
-    /** Plays ADTS AAC from the Mac while the session is up. Null when idle. */
-    private var audioPlayer: AudioPlayer? = null
-
     /** Restored into WindowManager attrs on disconnect (0 = was not overridden). */
     private var savedDisplayModeId = 0
 
@@ -1148,13 +1145,6 @@ class MainActivity : AppCompatActivity() {
                 binding.latencyText.text = String.format("%.1f ms", rttMs)
             }
         }
-        // Audio frames arrive only when the Mac's Audio Output = Tablet (the
-        // server sends them solely to clients that advertised type 15).
-        streamClient?.onAudioFrame = { data, size ->
-            if (audioPlayer == null) audioPlayer = AudioPlayer()
-            audioPlayer?.feed(data, size)
-        }
-
         streamClient?.onConnectionStatus = { connected ->
             runOnUiThread {
                 isConnected = connected
@@ -1424,14 +1414,6 @@ class MainActivity : AppCompatActivity() {
                         binding.latencyText.text = String.format("%.1f ms", rttMs)
                     }
                 }
-                // Same as setupStreamClientCallbacks: RTT feeds the prediction
-                // horizon, audio frames feed the player (sent only when the
-                // Mac's Audio Output = Tablet).
-                streamClient?.onAudioFrame = { data, size ->
-                    if (audioPlayer == null) audioPlayer = AudioPlayer()
-                    audioPlayer?.feed(data, size)
-                }
-
                 streamClient?.onConnectionStatus = { connected ->
                     runOnUiThread {
                         // Update connection state flag
@@ -1589,8 +1571,6 @@ class MainActivity : AppCompatActivity() {
             disconnect()
             videoDecoder?.release()
             videoDecoder = null
-            audioPlayer?.release()
-            audioPlayer = null
             currentTextureSurface?.release()
             currentTextureSurface = null
 
@@ -1775,10 +1755,12 @@ class MainActivity : AppCompatActivity() {
             ) == 1
         updateChecklistItem(binding.checkUsbDebugging, isAdbEnabled)
 
-        // Check USB connected (check if any USB device is connected)
+        // Check USB connected. The charging heuristic lies on tablets whose
+        // battery management pauses charging (PD re-negotiation, charge limits) —
+        // the reverse-tunnel probe below is the authoritative signal, so record
+        // the heuristic here and reconcile after the probe resolves.
         val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         val isUsbConnected = usbManager.deviceList.isNotEmpty() || isCharging()
-        updateChecklistItem(binding.checkUsbConnected, isUsbConnected)
 
         // Check Mac Server (try to connect to port)
         lifecycleScope.launch(Dispatchers.IO) {
@@ -1803,9 +1785,13 @@ class MainActivity : AppCompatActivity() {
                 if (isConnected) return@runOnUiThread
 
                 updateChecklistItem(binding.checkMacServer, isServerRunning)
+                // A live tunnel proves cable + adb in one shot; charge-managed
+                // tablets would otherwise flap "not connected" mid-session.
+                updateChecklistItem(binding.checkUsbConnected, isUsbConnected || isServerRunning)
 
                 // Update main status indicator based on all checklist items
-                val allReady = isDeveloperModeEnabled && isAdbEnabled && isUsbConnected && isServerRunning
+                val allReady = isDeveloperModeEnabled && isAdbEnabled && isServerRunning &&
+                    (isUsbConnected || isServerRunning)
                 updateMainStatus(allReady)
             }
         }

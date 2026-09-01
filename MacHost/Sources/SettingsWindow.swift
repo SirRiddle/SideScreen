@@ -1206,8 +1206,30 @@ class DisplaySettings: ObservableObject {
     @Published var hiDPI: Bool {
         didSet { save("hiDPI", hiDPI) }
     }
+    /// Per-transport rates: what the user last chose on each link. `bitrate` is
+    /// the ACTIVE transport's mirror (UI edits land here; changes propagate by
+    /// transport switch or direct usb/wifi writes). The persisted legacy key
+    /// "bitrate" is only read once, at migration.
+    @Published var usbBitrateMbps: Int {
+        didSet {
+            save("usbBitrateMbps", usbBitrateMbps)
+            if connectionMode == .usb, bitrate != usbBitrateMbps { bitrate = usbBitrateMbps }
+        }
+    }
+    @Published var wifiBitrateMbps: Int {
+        didSet {
+            save("wifiBitrateMbps", wifiBitrateMbps)
+            if connectionMode == .wireless, bitrate != wifiBitrateMbps { bitrate = wifiBitrateMbps }
+        }
+    }
+    /// Mirrors whichever of usbBitrateMbps/wifiBitrateMbps applies to the
+    /// current connectionMode; assignment updates that transport's store.
     @Published var bitrate: Int {
-        didSet { save("bitrate", bitrate) }
+        didSet {
+            if connectionMode == .usb {
+                if usbBitrateMbps != bitrate { usbBitrateMbps = bitrate }
+            } else if wifiBitrateMbps != bitrate { wifiBitrateMbps = bitrate }
+        }
     }
     @Published var quality: String {
         didSet { save("quality", quality) }
@@ -1243,7 +1265,12 @@ class DisplaySettings: ObservableObject {
         didSet { save("penModeEnabled", penModeEnabled) }
     }
     @Published var connectionMode: ConnectionMode {
-        didSet { save("connectionMode", connectionMode.rawValue) }
+        didSet {
+            save("connectionMode", connectionMode.rawValue)
+            // Re-mirror the active transport's value into `bitrate`.
+            let active = connectionMode == .usb ? usbBitrateMbps : wifiBitrateMbps
+            if bitrate != active { bitrate = active }
+        }
     }
     @Published var autoStartStreamingOnLaunch: Bool {
         didSet { save("autoStartStreamingOnLaunch", autoStartStreamingOnLaunch) }
@@ -1279,7 +1306,7 @@ class DisplaySettings: ObservableObject {
         self.resolution = defaults.string(forKey: keyPrefix + "resolution") ?? "1920x1200"
         self.refreshRate = defaults.object(forKey: keyPrefix + "refreshRate") as? Int ?? 60  // Default: 60 — balanced for most tablets. 120 may saturate high-res panel pipelines.
         self.hiDPI = defaults.bool(forKey: keyPrefix + "hiDPI")
-        self.bitrate = defaults.object(forKey: keyPrefix + "bitrate") as? Int ?? 1000  // Default: 1000 Mbps
+        self.bitrate = 1000  // legacy placeholder; per-transport migration runs at the end
         self.quality = defaults.string(forKey: keyPrefix + "quality") ?? "ultralow"  // Default: fastest encoding
         self.gamingBoost = defaults.bool(forKey: keyPrefix + "gamingBoost")
         // Default port 54321 (was 8888 in <=0.7.1; 8888 collides with jupyter/splunk/HP printers).
@@ -1299,6 +1326,25 @@ class DisplaySettings: ObservableObject {
         self.autoStartStreamingOnLaunch = defaults.object(forKey: keyPrefix + "autoStartStreamingOnLaunch") as? Bool ?? false
         let startupRaw = defaults.string(forKey: keyPrefix + "startupMode") ?? modeRaw
         self.startupMode = ConnectionMode(rawValue: startupRaw) ?? .usb
+
+        // Per-transport bitrate (v2): legacy single "bitrate" key migrates once.
+        // Legacy 1000 (the old default) → fresh conservative defaults; a custom
+        // legacy value → kept on USB, capped for WiFi. Runs AFTER every stored
+        // property is initialized (mirror reads connectionMode + usb/wifi).
+        let legacyBitrate = defaults.object(forKey: keyPrefix + "bitrate") as? Int
+        if defaults.object(forKey: keyPrefix + "usbBitrateMbps") == nil {
+            if let legacy = legacyBitrate, legacy != 1000 {
+                self.usbBitrateMbps = legacy
+                self.wifiBitrateMbps = min(legacy, 40)
+            } else {
+                self.usbBitrateMbps = 80
+                self.wifiBitrateMbps = 30
+            }
+        } else {
+            self.usbBitrateMbps = defaults.object(forKey: keyPrefix + "usbBitrateMbps") as? Int ?? 80
+            self.wifiBitrateMbps = defaults.object(forKey: keyPrefix + "wifiBitrateMbps") as? Int ?? 30
+        }
+        self.bitrate = connectionMode == .usb ? usbBitrateMbps : wifiBitrateMbps
 
         print("Loaded settings: \(resolution) @ \(refreshRate)Hz, bitrate=\(bitrate), quality=\(quality)")
     }
@@ -1371,7 +1417,9 @@ class DisplaySettings: ObservableObject {
         resolution = "1920x1200"
         refreshRate = 120  // Default: highest FPS
         hiDPI = false
-        bitrate = 1000  // Default: 1000 Mbps
+        usbBitrateMbps = 80
+        wifiBitrateMbps = 30
+        bitrate = connectionMode == .usb ? usbBitrateMbps : wifiBitrateMbps
         quality = "ultralow"  // Default: fastest encoding
         gamingBoost = false
         port = 54321

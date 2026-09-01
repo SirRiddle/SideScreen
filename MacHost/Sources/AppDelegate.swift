@@ -762,7 +762,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 bitrateMbps: settings.effectiveBitrate,
                 quality: settings.effectiveQuality,
                 gamingBoost: settings.gamingBoost,
-                frameRate: settings.effectiveRefreshRate
+                frameRate: settings.effectiveRefreshRate,
+                bitrateFloorMbps: settings.connectionMode == .usb ? 60 : 20
             )
 
             await MainActor.run {

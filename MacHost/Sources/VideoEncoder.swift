@@ -17,9 +17,11 @@ class VideoEncoder {
     private var quality: String = "medium"
     private var gamingBoost: Bool = false
     private var frameRate: Int = 60
+    private let bitrateFloorMbps: Int
     private let stateLock = OSAllocatedUnfairLock(initialState: EncoderState())
-    init(width: Int, height: Int, codec: StreamCodec = .hevc, bitrateMbps: Int = 20, quality: String = "ultralow", gamingBoost: Bool = false, frameRate: Int = 60) {
+    init(width: Int, height: Int, codec: StreamCodec = .hevc, bitrateMbps: Int = 20, quality: String = "ultralow", gamingBoost: Bool = false, frameRate: Int = 60, bitrateFloorMbps: Int = 60) {
         self.width = width
+        self.bitrateFloorMbps = bitrateFloorMbps
         self.height = height
         self.codec = codec
         self.bitrateMbps = gamingBoost ? 50 : bitrateMbps
@@ -79,7 +81,9 @@ class VideoEncoder {
         // Dynamic bitrate - remove strict rate limiting for smoother streaming
         // All-intra needs higher bitrate for text sharpness
         // USB-C supports 5Gbps, so 80-100Mbps is fine
-        let effectiveBitrate = gamingBoost ? bitrateMbps : max(bitrateMbps, 60)
+        // Transport floor: the link, not the setting, decides how low is useful.
+        // USB holds 60 for text sharpness; WiFi honors anything down to 20.
+        let effectiveBitrate = gamingBoost ? bitrateMbps : max(bitrateMbps, bitrateFloorMbps)
         let bitrateBps = effectiveBitrate * 1_000_000
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrateBps as CFNumber)
         // Removed DataRateLimits - was causing bursty traffic and buffer stalls

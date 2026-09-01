@@ -82,6 +82,15 @@ class MainActivity : AppCompatActivity() {
     // Input prediction for low-latency gaming
     private val inputPredictor = InputPredictor()
 
+    /** Last measured RTT in ms (1Hz ping); feeds the adaptive prediction horizon. */
+    private var lastRttMs = 0f
+
+    /** Once-per-session guard for the decoder-stall auto-recovery path. */
+    private var stallRecoveryAttempted = false
+
+    /** Restored into WindowManager attrs on disconnect (0 = was not overridden). */
+    private var savedDisplayModeId = 0
+
     // Checklist status handler
     private val checklistHandler = Handler(Looper.getMainLooper())
     private var checklistRunnable: Runnable? = null
@@ -1022,24 +1031,38 @@ class MainActivity : AppCompatActivity() {
                 streamClient?.requestKeyframe(force = force, reason = reason)
             }
             videoDecoder?.onDecoderStalled = {
-                // Black screen with live stats: tell the user why instead of
-                // staying silent (issue #41). Toast renders above the (black)
-                // SurfaceView; the settings panel is hidden while streaming.
-                // The sustainable size, not the decoder's advertised one — that is typically far
-                // above anything it can really output, which made this message actively misleading.
-                val panel = PanelGeometry.of(displayObj)
-                val cap =
-                    panel?.let { CodecCapabilities.maxStreamSize(mime, it.width, it.height, it.refreshHz) }
-                runOnUiThread {
-                    val capText = cap?.let { " (max ~${it.first}×${it.second})" } ?: ""
-                    android.widget.Toast
-                        .makeText(
-                            this,
-                            "No video output — the stream resolution may exceed " +
-                                "this tablet's decoder limit$capText. " +
-                                "Lower the resolution or disable HiDPI on the Mac.",
-                            android.widget.Toast.LENGTH_LONG,
-                        ).show()
+                // Auto-recovery before nagging: a decoder that accepts many frames
+                // without output can often be revived by a rebuild + fresh IDR.
+                // Once per session; the encore gets the toast below.
+                if (!stallRecoveryAttempted) {
+                    stallRecoveryAttempted = true
+                    mainDiag("Decoder stalled — attempting rebuild + forced IDR")
+                    try {
+                        videoDecoder?.release()
+                        videoDecoder = null
+                    } catch (_: Exception) {
+                    }
+                    runOnUiThread { initializeDecoderForCurrentSurface() }
+                } else {
+                    // Black screen with live stats: tell the user why instead of
+                    // staying silent (issue #41). Toast renders above the (black)
+                    // SurfaceView; the settings panel is hidden while streaming.
+                    // The sustainable size, not the decoder's advertised one — that is typically far
+                    // above anything it can really output, which made this message actively misleading.
+                    val panel = PanelGeometry.of(displayObj)
+                    val cap =
+                        panel?.let { CodecCapabilities.maxStreamSize(mime, it.width, it.height, it.refreshHz) }
+                    runOnUiThread {
+                        val capText = cap?.let { " (max ~${it.first}×${it.second})" } ?: ""
+                        android.widget.Toast
+                            .makeText(
+                                this,
+                                "No video output — the stream resolution may exceed " +
+                                    "this tablet's decoder limit$capText. " +
+                                    "Lower the resolution or disable HiDPI on the Mac.",
+                                android.widget.Toast.LENGTH_LONG,
+                            ).show()
+                    }
                 }
             }
             streamClient?.requestKeyframe(force = true, reason = "decoder initialized")
@@ -1056,6 +1079,49 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Pin the panel to its highest-refresh mode at the current resolution while
+     * streaming, and restore the previous mode on disconnect. Without this a
+     * 90/120Hz tablet presents a 60Hz raster: up to ~16.7ms present latency per
+     * frame and wasted decoder operating rate. (KEY_OPERATING_RATE reads the
+     * panel's live refresh, so it follows the mode switch automatically.)
+     */
+    private fun applyHighRefreshMode(enable: Boolean) {
+        val currentDisplay = display ?: return
+        val lp = window.attributes
+        if (enable) {
+            val current = currentDisplay.mode
+            val best =
+                currentDisplay.supportedModes
+                    .filter {
+                        it.physicalWidth == current.physicalWidth &&
+                            it.physicalHeight == current.physicalHeight
+                    }.maxByOrNull { it.refreshRate }
+            if (best != null && best.refreshRate > current.refreshRate) {
+                savedDisplayModeId = lp.preferredDisplayModeId
+                lp.preferredDisplayModeId = best.modeId
+                window.attributes = lp
+                log("High-refresh mode: ${current.refreshRate}Hz -> ${best.refreshRate}Hz")
+            }
+        } else if (lp.preferredDisplayModeId != 0) {
+            lp.preferredDisplayModeId = savedDisplayModeId
+            window.attributes = lp
+            savedDisplayModeId = 0
+        }
+    }
+
+    /**
+     * Adaptive touch-prediction horizon: half the measured RTT (one-way transit)
+     * + average in-codec decode time + one panel frame. Clamped: too short
+     * under-compensates, too long overshoots on direction changes.
+     */
+    private fun predictionHorizonMs(): Float {
+        val rtt = if (lastRttMs > 0f) lastRttMs else 20f
+        val decode = videoDecoder?.averageDecodeLatencyMs() ?: 8f
+        val frame = 1000f / (display?.refreshRate ?: 60f)
+        return (rtt / 2f + decode + frame).coerceIn(8f, 35f)
+    }
+
+    /**
      * Wire up all StreamClient callbacks. Used by both USB connect() and wireless connectWireless().
      */
     private fun setupStreamClientCallbacks() {
@@ -1064,7 +1130,8 @@ class MainActivity : AppCompatActivity() {
             if (dec != null) {
                 dec.decode(frameData, frameSize, timestamp, isKeyframe)
             } else {
-                mainDiag("FRAME DROPPED: videoDecoder is null!")
+                streamClient?.releaseBuffer(frameData)
+                mainDiag("FRAME DROPPED: videoDecoder is null (buffer released)")
             }
         }
 
@@ -1074,6 +1141,7 @@ class MainActivity : AppCompatActivity() {
 
         streamClient?.onLatencyMeasured = { rttMs ->
             runOnUiThread {
+                lastRttMs = rttMs.toFloat()
                 binding.latencyText.text = String.format("%.1f ms", rttMs)
             }
         }
@@ -1081,6 +1149,10 @@ class MainActivity : AppCompatActivity() {
         streamClient?.onConnectionStatus = { connected ->
             runOnUiThread {
                 isConnected = connected
+                applyHighRefreshMode(connected)
+                if (!connected) {
+                    stallRecoveryAttempted = false
+                }
                 if (connected) {
                     updateStatus("Connected - Streaming active")
                 } else {
@@ -1540,7 +1612,7 @@ class MainActivity : AppCompatActivity() {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 inputPredictor.reset()
-                inputPredictor.addSample(x, y)
+                inputPredictor.addSample(x, y, event.eventTime * 1_000_000L)
                 streamClient?.sendTouch(x, y, 0, pointerCount, x2, y2)
             }
 
@@ -1550,8 +1622,8 @@ class MainActivity : AppCompatActivity() {
 
             MotionEvent.ACTION_MOVE -> {
                 if (pointerCount == 1) {
-                    inputPredictor.addSample(x, y)
-                    val (px, py) = inputPredictor.predictPosition(12f)
+                    inputPredictor.addSample(x, y, event.eventTime * 1_000_000L)
+                    val (px, py) = inputPredictor.predictPosition(predictionHorizonMs())
                     streamClient?.sendTouch(px, py, 1, 1)
                 } else {
                     streamClient?.sendTouch(x, y, 1, pointerCount, x2, y2)

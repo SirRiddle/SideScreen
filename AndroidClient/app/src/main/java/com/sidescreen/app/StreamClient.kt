@@ -118,6 +118,27 @@ class StreamClient(
     private val touchDispatcher = touchExecutor.asCoroutineDispatcher()
     private val touchScope = CoroutineScope(touchDispatcher)
 
+    // The frame receive loop is the busiest stage in the app (read → parse →
+    // memcpy → codec-queue for every video frame) yet previously ran on the
+    // shared Dispatchers.IO pool at default priority — multi-ms scheduling
+    // tail spikes under GC/UI load. Give it the same treatment as touch.
+    private val receiveExecutor =
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(
+                {
+                    try {
+                        Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY)
+                    } catch (_: Exception) {
+                    }
+                    runnable.run()
+                },
+                "ReceiveThread",
+            ).apply {
+                priority = Thread.MAX_PRIORITY
+            }
+        }
+    private val receiveDispatcher = receiveExecutor.asCoroutineDispatcher()
+
     suspend fun connect() =
         withContext(Dispatchers.IO) {
             try {
@@ -432,7 +453,7 @@ class StreamClient(
     }
 
     private suspend fun receiveData() =
-        withContext(Dispatchers.IO) {
+        withContext(receiveDispatcher) {
             val input = inputStream ?: return@withContext
 
             try {

@@ -59,6 +59,15 @@ class VideoDecoder(
     var onFrameDecoded: ((ByteArray) -> Unit)? = null
     var onKeyframeRequired: ((force: Boolean, reason: String) -> Unit)? = null
 
+    /** EWMA of in-codec latency, fed from each successfully measured output. */
+    @Volatile private var decodeLatencyAvgMs = 0f
+
+    /** Average in-codec latency in ms (0 until first measured frame). */
+    fun averageDecodeLatencyMs(): Float = decodeLatencyAvgMs
+
+    private var staleDropWindowStartNs = 0L
+    private var staleDropStreak = 0
+
     /** Fired once when the decoder has accepted many frames but never output any —
      *  the black-screen-with-live-stats signature (stream above the device's
      *  decode limit, or an unusable decoder). Counts only frames actually queued
@@ -451,6 +460,13 @@ class VideoDecoder(
                 latencySumNs += latencyNs
                 latencySamples++
                 if (latencyNs > latencyMaxNs) latencyMaxNs = latencyNs
+                val latencyMsNow = latencyNs / 1_000_000f
+                decodeLatencyAvgMs =
+                    if (decodeLatencyAvgMs == 0f) {
+                        latencyMsNow
+                    } else {
+                        decodeLatencyAvgMs * 0.9f + latencyMsNow * 0.1f
+                    }
             }
 
             if (outputFrameCount % 60L == 0L) {
@@ -475,6 +491,17 @@ class VideoDecoder(
             if (!shouldRender) {
                 droppedFrames++
                 staleOutputDrops++
+                // Sustained stale drops = the decoder/graphic queue can't keep up.
+                // A fresh IDR shrinks decode work (no long P-frame chains to chase)
+                // and resyncs presentation instead of smearing old deltas.
+                if (nowNs - staleDropWindowStartNs > STALE_DROP_WINDOW_NS) {
+                    staleDropWindowStartNs = nowNs
+                    staleDropStreak = 0
+                }
+                if (++staleDropStreak >= STALE_DROP_STREAK_FOR_IDR) {
+                    staleDropStreak = 0
+                    requestKeyframe("sustained stale output drops", force = true)
+                }
                 if (staleOutputDrops <= 3L || staleOutputDrops % 60L == 0L) {
                     diagLog(
                         "Dropping stale output frame: latency=${"%.1f".format(latencyNs / 1_000_000.0)}ms, " +
@@ -546,6 +573,8 @@ class VideoDecoder(
         private const val KEYFRAME_REQUEST_INTERVAL_NS = 1_000_000_000L
         private const val FORCE_KEYFRAME_REQUEST_INTERVAL_NS = 200_000_000L
         private const val MAX_RENDER_LATENCY_NS = 100_000_000L
+        private const val STALE_DROP_WINDOW_NS = 500_000_000L
+        private const val STALE_DROP_STREAK_FOR_IDR = 3
         private const val MAX_REASONABLE_LATENCY_NS = 2_000_000_000L
     }
 }

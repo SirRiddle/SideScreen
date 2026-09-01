@@ -1,7 +1,5 @@
 package com.sidescreen.app
 
-import android.os.SystemClock
-
 /**
  * Predicts touch input position based on velocity to reduce perceived latency
  * Critical for FPS gaming where every millisecond counts
@@ -23,9 +21,12 @@ class InputPredictor {
     fun addSample(
         x: Float,
         y: Float,
+        timestampNanos: Long,
     ) {
-        val timestamp = SystemClock.elapsedRealtimeNanos()
-        history.addLast(TouchSample(x, y, timestamp))
+        // Caller MUST pass MotionEvent.eventTime-derived nanos, not a
+        // processing-time clock: UI-thread jitter would otherwise skew the
+        // velocity estimate (dt and delta are from different timelines).
+        history.addLast(TouchSample(x, y, timestampNanos))
 
         // Keep only last 5 samples for velocity calculation
         if (history.size > 5) {
@@ -60,6 +61,19 @@ class InputPredictor {
         if (dt < 0.1f) {
             // Samples too close together, might be noise
             return Pair(curr.x, curr.y)
+        }
+        // Direction reversal: the sign flip between the previous and current
+        // deltas means velocity is mid-transition — extrapolating through it
+        // overshoots corners (most visible with pen strokes). Hold position.
+        if (history.size >= 3) {
+            val prevPrev = history[history.size - 3]
+            val d1x = prev.x - prevPrev.x
+            val d1y = prev.y - prevPrev.y
+            val d2x = curr.x - prev.x
+            val d2y = curr.y - prev.y
+            if (d1x * d2x + d1y * d2y < 0f) {
+                return Pair(curr.x, curr.y)
+            }
         }
 
         // Velocity in units per millisecond

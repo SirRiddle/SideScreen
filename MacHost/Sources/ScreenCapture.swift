@@ -100,15 +100,15 @@ class ScreenCapture {
 
     /// Server pacing feedback (wired from StreamingServer.onSendIdleChanged).
     func setSendIdle(_ idle: Bool) {
-        var toEncode: PendingRaw?
-        gateLock.withLock { state in
+        let toEncode: PendingRaw? = gateLock.withLock { state in
             state.sendIdle = idle
             if idle, !state.encoderBusy, let p = state.pending {
                 state.pending = nil
                 state.encoderBusy = true
                 state.busySinceNs = DispatchTime.now().uptimeNanoseconds
-                toEncode = p
+                return p
             }
+            return nil
         }
         if let f = toEncode { encodeNow(f) }
     }
@@ -116,8 +116,7 @@ class ScreenCapture {
     /// Single entry for every captured frame: SCStream, CGDisplayStream
     /// fallback, keepalive and IDR replays all land here.
     private func submitLatestFrame(buffer: CVPixelBuffer, pts: CMTime, arrivalNanos: UInt64) {
-        var toEncode: PendingRaw?
-        gateLock.withLock { state in
+        let toEncode: PendingRaw? = gateLock.withLock { state in
             let now = DispatchTime.now().uptimeNanoseconds
             if state.encoderBusy && now &- state.busySinceNs > 250_000_000 {
                 // VT accepted a frame but never produced output (rare). The
@@ -132,11 +131,11 @@ class ScreenCapture {
             if !state.encoderBusy && state.sendIdle {
                 state.encoderBusy = true
                 state.busySinceNs = now
-                toEncode = PendingRaw(buffer: buffer, pts: pts, arrivalNanos: arrivalNanos)
-            } else {
-                state.pending = PendingRaw(buffer: buffer, pts: pts, arrivalNanos: arrivalNanos)
-                state.replacements += 1
+                return PendingRaw(buffer: buffer, pts: pts, arrivalNanos: arrivalNanos)
             }
+            state.pending = PendingRaw(buffer: buffer, pts: pts, arrivalNanos: arrivalNanos)
+            state.replacements += 1
+            return nil
         }
         if let f = toEncode { encodeNow(f) }
     }
@@ -162,15 +161,15 @@ class ScreenCapture {
     /// Called from the encoder output-callback wiring: the submitted frame's
     /// encode completed (server-side accept is a separate concern).
     private func encoderDidFinishFrame() {
-        var toEncode: PendingRaw?
-        gateLock.withLock { state in
+        let toEncode: PendingRaw? = gateLock.withLock { state in
             state.encoderBusy = false
             if state.sendIdle, let p = state.pending {
                 state.pending = nil
                 state.encoderBusy = true
                 state.busySinceNs = DispatchTime.now().uptimeNanoseconds
-                toEncode = p
+                return p
             }
+            return nil
         }
         if let f = toEncode { encodeNow(f) }
     }

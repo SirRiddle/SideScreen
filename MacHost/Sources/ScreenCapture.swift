@@ -76,7 +76,104 @@ class ScreenCapture {
     private var currentBitrateFloorMbps: Int = 60
     // Encoding pipeline state (captured by frame handler closure)
     private var encodeQueue: DispatchQueue?
-    private var pendingEncodes: Int32 = 0
+
+    // MARK: - Submission gate (pre-encode backpressure; A+C of the review plan)
+    //
+    // Freshness lives BEFORE the encoder: at most one raw frame waits; newer
+    // captures replace it. Encoded frames are never dropped or reordered — the
+    // IPP dependency chain allows nothing else. A frame enters the encoder only
+    // when the encoder is idle AND the sender has no frame in flight.
+    private struct PendingRaw {
+        let buffer: CVPixelBuffer
+        let pts: CMTime
+        let arrivalNanos: UInt64
+    }
+    private struct GateState {
+        var pending: PendingRaw?
+        var encoderBusy = false
+        var busySinceNs: UInt64 = 0
+        var sendIdle = true
+        var gateTimeouts = 0
+        var replacements = 0
+    }
+    private let gateLock = OSAllocatedUnfairLock(initialState: GateState())
+
+    /// Server pacing feedback (wired from StreamingServer.onSendIdleChanged).
+    func setSendIdle(_ idle: Bool) {
+        var toEncode: PendingRaw?
+        gateLock.withLock { state in
+            state.sendIdle = idle
+            if idle, !state.encoderBusy, let p = state.pending {
+                state.pending = nil
+                state.encoderBusy = true
+                state.busySinceNs = DispatchTime.now().uptimeNanoseconds
+                toEncode = p
+            }
+        }
+        if let f = toEncode { encodeNow(f) }
+    }
+
+    /// Single entry for every captured frame: SCStream, CGDisplayStream
+    /// fallback, keepalive and IDR replays all land here.
+    private func submitLatestFrame(buffer: CVPixelBuffer, pts: CMTime, arrivalNanos: UInt64) {
+        var toEncode: PendingRaw?
+        gateLock.withLock { state in
+            let now = DispatchTime.now().uptimeNanoseconds
+            if state.encoderBusy && now &- state.busySinceNs > 250_000_000 {
+                // VT accepted a frame but never produced output (rare). The
+                // encoded stream is still consistent — nothing was dropped
+                // post-encode — so releasing the gate is safe. Counted.
+                state.encoderBusy = false
+                state.gateTimeouts += 1
+                if state.gateTimeouts <= 3 || state.gateTimeouts % 60 == 0 {
+                    debugLog("Encode gate timeout #\(state.gateTimeouts) — releasing")
+                }
+            }
+            if !state.encoderBusy && state.sendIdle {
+                state.encoderBusy = true
+                state.busySinceNs = now
+                toEncode = PendingRaw(buffer: buffer, pts: pts, arrivalNanos: arrivalNanos)
+            } else {
+                state.pending = PendingRaw(buffer: buffer, pts: pts, arrivalNanos: arrivalNanos)
+                state.replacements += 1
+            }
+        }
+        if let f = toEncode { encodeNow(f) }
+    }
+
+    private func encodeNow(_ frame: PendingRaw) {
+        encodeQueue?.async { [weak self] in
+            guard let self else { return }
+            // If the session's encoder vanished mid-flight (restart), release
+            // the gate instead of leaving it permanently busy.
+            guard let encoder = self.encoder else {
+                self.encoderFailedToAccept()
+                return
+            }
+            encoder.encode(pixelBuffer: frame.buffer, presentationTimeStamp: frame.pts, captureNanos: frame.arrivalNanos)
+        }
+    }
+
+    /// Gate release when the submitted frame could not be handed to an encoder.
+    private func encoderFailedToAccept() {
+        gateLock.withLock { $0.encoderBusy = false }
+    }
+
+    /// Called from the encoder output-callback wiring: the submitted frame's
+    /// encode completed (server-side accept is a separate concern).
+    private func encoderDidFinishFrame() {
+        var toEncode: PendingRaw?
+        gateLock.withLock { state in
+            state.encoderBusy = false
+            if state.sendIdle, let p = state.pending {
+                state.pending = nil
+                state.encoderBusy = true
+                state.busySinceNs = DispatchTime.now().uptimeNanoseconds
+                toEncode = p
+            }
+        }
+        if let f = toEncode { encodeNow(f) }
+    }
     private var lastPixelBuffer: CVPixelBuffer?
 
     /// Callback when capture method changes (e.g. SCStream → CGDisplayStream fallback)
@@ -112,16 +209,14 @@ class ScreenCapture {
 
         requestKeyframe()
 
-        guard let encoder, let cached = lastPixelBuffer else { return }
+        guard let cached = lastPixelBuffer, encoder != nil else { return }
 
         let pts = CMTime(
             value: CMTimeValue(DispatchTime.now().uptimeNanoseconds / 1000),
             timescale: 1_000_000
         )
 
-        encodeQueue?.async {
-            encoder.encode(pixelBuffer: cached, presentationTimeStamp: pts)
-        }
+        submitLatestFrame(buffer: cached, pts: pts, arrivalNanos: now)
     }
 
     var displayWidth: Int {
@@ -365,7 +460,6 @@ class ScreenCapture {
     private func configureFrameHandler(label: String) {
         let queue = DispatchQueue(label: "encodeQueue.\(label)", qos: .userInteractive)
         encodeQueue = queue
-        pendingEncodes = 0
         lastPixelBuffer = nil
 
         streamOutput?.onFrameReceived = { [weak self] sampleBuffer in
@@ -392,25 +486,13 @@ class ScreenCapture {
 
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
-            // Backpressure: skip if encode queue already has 2+ frames pending
-            let pending = OSAtomicAdd32(0, &self.pendingEncodes)
-            if pending >= 2 {
-                return
-            }
-
             if let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
                 self.lastPixelBuffer = imageBuffer
-                OSAtomicIncrement32(&self.pendingEncodes)
-                queue.async {
-                    self.encoder?.encode(pixelBuffer: imageBuffer, presentationTimeStamp: pts, captureNanos: frameArrivalNanos)
-                    OSAtomicDecrement32(&self.pendingEncodes)
-                }
+                self.submitLatestFrame(buffer: imageBuffer, pts: pts, arrivalNanos: frameArrivalNanos)
             } else if let cached = self.lastPixelBuffer {
-                OSAtomicIncrement32(&self.pendingEncodes)
-                queue.async {
-                    self.encoder?.encode(pixelBuffer: cached, presentationTimeStamp: pts, captureNanos: frameArrivalNanos)
-                    OSAtomicDecrement32(&self.pendingEncodes)
-                }
+                // Frameless sample (rare): re-submit the cached one, freshly
+                // stamped — it passes through the same replaceable slot.
+                self.submitLatestFrame(buffer: cached, pts: pts, arrivalNanos: frameArrivalNanos)
             }
         }
     }
@@ -436,8 +518,9 @@ class ScreenCapture {
         let (width, height) = encodeSize(for: codec)
 
         encoder = VideoEncoder(width: width, height: height, codec: codec, bitrateMbps: bitrateMbps, quality: quality, gamingBoost: gamingBoost, frameRate: frameRate, bitrateFloorMbps: bitrateFloorMbps)
-        encoder?.onEncodedFrame = { [weak server] data, timestamp, isKeyframe in
+        encoder?.onEncodedFrame = { [weak server, weak self] data, timestamp, isKeyframe in
             server?.sendFrame(data, timestamp: timestamp, isKeyframe: isKeyframe)
+            self?.encoderDidFinishFrame()
         }
         // Apply any keyframe request that arrived before the encoder existed
         let shouldForceInitialKeyframe = keyframeRequestLock.withLock { state -> Bool in
@@ -509,8 +592,12 @@ class ScreenCapture {
                         value: CMTimeValue(DispatchTime.now().uptimeNanoseconds / 1000),
                         timescale: 1_000_000
                     )
-                    self.encodeQueue?.async {
-                        self.encoder?.encode(pixelBuffer: lastBuffer, presentationTimeStamp: pts)
+
+                    // Skip entirely if a fresher frame already waits in the gate —
+                    // keepalives must never displace real content in the slot.
+                    let needsKeepalive = self.gateLock.withLock { $0.pending == nil }
+                    if needsKeepalive {
+                        self.submitLatestFrame(buffer: lastBuffer, pts: pts, arrivalNanos: DispatchTime.now().uptimeNanoseconds)
                     }
                     self.stateLock.withLock { $0.lastFrameTime = DispatchTime.now() }
                     // Keep monitoring — real errors are handled by the SCStream error delegate
@@ -706,7 +793,7 @@ class ScreenCapture {
 
                 // Use CMClock for accurate timestamps instead of raw Mach time
                 let pts = CMClockGetTime(CMClockGetHostTimeClock())
-                self.encoder?.encode(pixelBuffer: pb, presentationTimeStamp: pts)
+                self.submitLatestFrame(buffer: pb, pts: pts, arrivalNanos: DispatchTime.now().uptimeNanoseconds)
             }
         ) else {
             debugLog("Failed to create CGDisplayStream — fallback unavailable")
@@ -767,8 +854,9 @@ class ScreenCapture {
         let (width, height) = encodeSize(for: codec)
         let server = currentServer
         let newEncoder = VideoEncoder(width: width, height: height, codec: codec, bitrateMbps: currentBitrateMbps, quality: currentQuality, gamingBoost: currentGamingBoost, frameRate: currentFrameRate, bitrateFloorMbps: currentBitrateFloorMbps)
-        newEncoder.onEncodedFrame = { [weak server] data, timestamp, isKeyframe in
+        newEncoder.onEncodedFrame = { [weak server, weak self] data, timestamp, isKeyframe in
             server?.sendFrame(data, timestamp: timestamp, isKeyframe: isKeyframe)
+            self?.encoderDidFinishFrame()
         }
         newEncoder.requestKeyframe()
         encoder = newEncoder

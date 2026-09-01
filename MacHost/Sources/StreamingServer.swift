@@ -165,6 +165,10 @@ class StreamingServer {
     /// Fired (rate-limited) when stale P-frames were dropped on a congested
     /// uplink so the capture side can force a fresh IDR and resync the client.
     var onBacklogRecoveryNeeded: (() -> Void)?
+    /// Fired on frameQueue when the sender transitions idle↔busy — the capture
+    /// side uses it to admit a new frame into the encoder only when the link
+    /// can take the result immediately.
+    var onSendIdleChanged: ((Bool) -> Void)?
 
     /// Non-keyframes older than this at send time are dropped: the client is
     /// already ~15+ frames behind at 60fps, so the picture would be useless.
@@ -173,6 +177,12 @@ class StreamingServer {
     private static let backlogRecoveryCooldownNs: UInt64 = 500_000_000
     private var lastStaleDropLogNs: UInt64 = 0
     private var lastBacklogRecoveryNs: UInt64 = 0
+    /// frameQueue-confined: number of frame sends currently handed to
+    /// Network.framework without a completion.
+    private var sendInFlight = 0
+    /// Bumped per accepted connection; completion accounting from a superseded
+    /// connection is ignored so it cannot corrupt the current session's count.
+    private let generationLock = OSAllocatedUnfairLock(initialState: UInt64(0))
     // Whether host wants to receive touch events from client. Ping/pong is
     // handled regardless. When false, incoming touch frames are dropped
     // immediately without parsing or dispatching to main queue.
@@ -355,6 +365,7 @@ class StreamingServer {
         clientDecodeLimits = nil
         clientSupportsDesktopGeometry = false
         waitingForSyncFrame = true
+        generationLock.withLock { $0 &+= 1 }
         inputBuffer.removeAll(keepingCapacity: true)
         connection = newConnection
         droppedFrames = 0
@@ -843,9 +854,25 @@ class StreamingServer {
 
             let packet = self.makeFramePacket(data, timestamp: timestamp, isKeyframe: isKeyframe)
 
-            connection.send(content: packet, completion: .contentProcessed { error in
-                if error != nil {
-                    self.droppedFrames += 1
+            let gen = self.generationLock.withLock { $0 }
+            self.sendInFlight += 1
+            if self.sendInFlight == 1 {
+                self.onSendIdleChanged?(false)
+            }
+            connection.send(content: packet, completion: .contentProcessed { [weak self] error in
+                // NWConnection runs completions on the connection's queue; confine
+                // all accounting to frameQueue, and ignore completions from a
+                // superseded connection (generation mismatch).
+                self?.frameQueue.async { [weak self] in
+                    guard let self = self else { return }
+                    guard self.generationLock.withLock({ $0 }) == gen else { return }
+                    if error != nil {
+                        self.droppedFrames += 1
+                    }
+                    self.sendInFlight = max(0, self.sendInFlight - 1)
+                    if self.sendInFlight == 0 {
+                        self.onSendIdleChanged?(true)
+                    }
                 }
             })
 

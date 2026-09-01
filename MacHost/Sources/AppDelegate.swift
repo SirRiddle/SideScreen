@@ -720,6 +720,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             streamingServer?.onBacklogRecoveryNeeded = { [weak self] in
                 self?.screenCapture?.requestKeyframeOrReplayCachedFrame(force: true)
             }
+            // Sender pacing → capture gate: only admit a frame into the encoder
+            // when the network has nothing in flight.
+            streamingServer?.onSendIdleChanged = { [weak self] idle in
+                self?.screenCapture?.setSendIdle(idle)
+            }
 
             streamingServer?.onClientDisconnected = { [weak self] in
                 guard let self = self else { return }

@@ -9,15 +9,15 @@
 <p><em>Turn your Android tablet into a second display for macOS — USB-C or wireless over WiFi</em></p>
 
 <p>
-  <img src="https://img.shields.io/github/v/release/tranvuongquocdat/SideScreen?style=for-the-badge&label=version&color=blue" alt="Version">
-  <a href="https://github.com/tranvuongquocdat/SideScreen/blob/main/LICENSE">
-    <img src="https://img.shields.io/github/license/tranvuongquocdat/SideScreen?style=for-the-badge&color=34C759" alt="License">
+  <img src="https://img.shields.io/github/v/release/SirRiddle/SideScreen?style=for-the-badge&label=version&color=blue" alt="Version">
+  <a href="https://github.com/SirRiddle/SideScreen/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/SirRiddle/SideScreen?style=for-the-badge&color=34C759" alt="License">
   </a>
-  <a href="https://github.com/tranvuongquocdat/SideScreen/stargazers">
-    <img src="https://img.shields.io/github/stars/tranvuongquocdat/SideScreen?style=for-the-badge&color=FF9500" alt="Stars">
+  <a href="https://github.com/SirRiddle/SideScreen/stargazers">
+    <img src="https://img.shields.io/github/stars/SirRiddle/SideScreen?style=for-the-badge&color=FF9500" alt="Stars">
   </a>
-  <a href="https://github.com/tranvuongquocdat/SideScreen/releases">
-    <img src="https://img.shields.io/github/downloads/tranvuongquocdat/SideScreen/total?style=for-the-badge&color=8E44AD&label=downloads" alt="Downloads">
+  <a href="https://github.com/SirRiddle/SideScreen/releases">
+    <img src="https://img.shields.io/github/downloads/SirRiddle/SideScreen/total?style=for-the-badge&color=8E44AD&label=downloads" alt="Downloads">
   </a>
 </p>
 
@@ -44,6 +44,10 @@ Side Screen brings true second-display functionality to your Android tablet — 
 While Apple's Sidecar only works with iPads, millions of Android tablets sit unused as potential workstations. Side Screen bridges that gap with hardware-accelerated H.265 streaming, sub-16ms pipeline latency on USB, and full touch input — making your tablet feel like a real monitor, not a laggy mirror.
 
 Built entirely open-source, Side Screen is designed to be fast, lightweight, and seamlessly integrated.
+
+> **This repository is an actively maintained fork of [tranvuongquocdat/SideScreen](https://github.com/tranvuongquocdat/SideScreen).** It merges proven upstream contributions and lands performance work ahead of upstream. Original author: **Tran Vuong Quoc Dat**.
+
+**New in 0.12.0 (this fork):** Pen/Draw Mode for stylus apps · HiDPI scaling options in macOS display settings · pipeline latency bounded under WiFi congestion (stale frames dropped + auto-resync instead of falling seconds behind) · high-refresh Android panels now actually present at 90/120Hz · adaptive touch prediction driven by measured latency · decoder stalls self-heal. See [CHANGELOG.md](CHANGELOG.md).
 
 For full details, features, and documentation, please visit **[sidescreen.dev](https://sidescreen.dev)**
 
@@ -118,7 +122,7 @@ Run a Mac with no display of its own — a Mac Studio or Mini on the go, or a la
 
 ## Installation
 
-Download the latest release from [**GitHub Releases**](https://github.com/tranvuongquocdat/SideScreen/releases):
+Download the latest release from [**GitHub Releases**](https://github.com/SirRiddle/SideScreen/releases):
 
 - **macOS**: Download `.dmg`, open it, drag Side Screen to Applications
 - **Android**: Download `.apk`, install on your tablet (enable "Unknown sources" if needed). Port forwarding is handled automatically by the Mac app.
@@ -146,7 +150,7 @@ Download the latest release from [**GitHub Releases**](https://github.com/tranvu
 <summary><strong>Build from source (for developers)</strong></summary>
 
 ```bash
-git clone https://github.com/tranvuongquocdat/SideScreen.git
+git clone https://github.com/SirRiddle/SideScreen.git
 cd SideScreen
 
 # macOS
@@ -256,8 +260,8 @@ Grant Screen Recording permission: **System Preferences → Privacy & Security �
 Contributions are welcome!
 
 - ⭐ **Star** this repo to help others discover it
-- 🐛 **Report bugs** via [Issues](https://github.com/tranvuongquocdat/SideScreen/issues)
-- 💡 **Suggest features** via [Issues](https://github.com/tranvuongquocdat/SideScreen/issues)
+- 🐛 **Report bugs** via [Issues](https://github.com/SirRiddle/SideScreen/issues)
+- 💡 **Suggest features** via [Issues](https://github.com/SirRiddle/SideScreen/issues)
 - 🔧 **Submit PRs** — see [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ---
@@ -288,6 +292,6 @@ If Side Screen is useful to you, consider supporting development:
 
 Made with ❤️ by **Tran Vuong Quoc Dat**
 
-[Report Bug](https://github.com/tranvuongquocdat/SideScreen/issues) · [Request Feature](https://github.com/tranvuongquocdat/SideScreen/issues) · [Discussions](https://github.com/tranvuongquocdat/SideScreen/discussions)
+[Report Bug](https://github.com/SirRiddle/SideScreen/issues) · [Request Feature](https://github.com/SirRiddle/SideScreen/issues) · [Discussions](https://github.com/SirRiddle/SideScreen/discussions)
 
 </div>

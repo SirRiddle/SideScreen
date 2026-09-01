@@ -23,6 +23,11 @@ jobs:
             .build/x86_64-apple-macosx/release/SideScreen \
             -output .build/release-universal/SideScreen
 
+      - name: Test
+        run: |
+          cd MacHost
+          swift test
+
       - name: Lint
         run: |
           brew install swiftlint

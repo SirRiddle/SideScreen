@@ -5,10 +5,8 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Process
 import android.util.Log
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.DataInputStream
 import java.io.IOException
@@ -115,8 +113,6 @@ class StreamClient(
                 priority = Thread.MAX_PRIORITY
             }
         }
-    private val touchDispatcher = touchExecutor.asCoroutineDispatcher()
-    private val touchScope = CoroutineScope(touchDispatcher)
 
     // The frame receive loop is the busiest stage in the app (read → parse →
     // memcpy → codec-queue for every video frame) yet previously ran on the
@@ -522,6 +518,23 @@ class StreamClient(
             }
         }
 
+    // Latest-MOVE slot: single-finger move events are replaceable until actually
+    // written — a slow link replays only the newest position instead of every
+    // stale coordinate. DOWN/UP/CANCEL and pointer transitions are never
+    // coalesced and always write in FIFO order (every event shares the same
+    // executor task queue, so ordering holds across slots and controls).
+    private val pendingMove = java.util.concurrent.atomic.AtomicReference<ByteArray?>(null)
+
+    private fun writeRaw(bytes: ByteArray) {
+        try {
+            socket?.getOutputStream()?.let { out ->
+                out.write(bytes)
+                out.flush()
+            }
+        } catch (_: Exception) {
+        }
+    }
+
     fun sendTouch(
         x: Float,
         y: Float,
@@ -531,27 +544,28 @@ class StreamClient(
         y2: Float = 0f,
     ) {
         if (!isConnected) return
+        val count = pointerCount.coerceIn(1, 2)
+        val size = 6 + count * 8 // 1 type + 1 count + N*(4x+4y) + 4 action
+        val buffer = ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN)
+        buffer.put(2.toByte())
+        buffer.put(count.toByte())
+        buffer.putFloat(x)
+        buffer.putFloat(y)
+        if (count == 2) {
+            buffer.putFloat(x2)
+            buffer.putFloat(y2)
+        }
+        buffer.putInt(action)
+        val bytes = buffer.array()
 
-        touchScope.launch {
-            try {
-                socket?.getOutputStream()?.let { out ->
-                    val count = pointerCount.coerceIn(1, 2)
-                    val size = 6 + count * 8 // 1 type + 1 count + N*(4x+4y) + 4 action
-                    val buffer = ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN)
-                    buffer.put(2.toByte())
-                    buffer.put(count.toByte())
-                    buffer.putFloat(x)
-                    buffer.putFloat(y)
-                    if (count == 2) {
-                        buffer.putFloat(x2)
-                        buffer.putFloat(y2)
-                    }
-                    buffer.putInt(action)
-                    out.write(buffer.array())
-                    out.flush()
-                }
-            } catch (_: Exception) {
+        if (action == 1 && count == 1) {
+            // Coalesceable: replace any unsent move; the task drains the slot.
+            pendingMove.set(bytes)
+            touchExecutor.execute {
+                pendingMove.getAndSet(null)?.let { writeRaw(it) }
             }
+        } else {
+            touchExecutor.execute { writeRaw(bytes) }
         }
     }
 
@@ -588,15 +602,7 @@ class StreamClient(
 
         val flags = if (force) KEYFRAME_REQUEST_FLAG_FORCE else 0
         diagLog("Requesting keyframe: reason=$reason, force=$force")
-        touchScope.launch {
-            try {
-                outputStream?.let { out ->
-                    out.write(byteArrayOf(MESSAGE_KEYFRAME_REQUEST.toByte(), flags.toByte()))
-                    out.flush()
-                }
-            } catch (_: Exception) {
-            }
-        }
+        touchExecutor.execute { writeRaw(byteArrayOf(MESSAGE_KEYFRAME_REQUEST.toByte(), flags.toByte())) }
     }
 
     /**
@@ -604,18 +610,10 @@ class StreamClient(
      */
     fun sendPing() {
         if (!isConnected) return
-        touchScope.launch {
-            try {
-                socket?.getOutputStream()?.let { out ->
-                    val buffer = ByteBuffer.allocate(9).order(ByteOrder.LITTLE_ENDIAN)
-                    buffer.put(4.toByte()) // Type 4: ping
-                    buffer.putLong(System.nanoTime())
-                    out.write(buffer.array())
-                    out.flush()
-                }
-            } catch (_: Exception) {
-            }
-        }
+        val buffer = ByteBuffer.allocate(9).order(ByteOrder.LITTLE_ENDIAN)
+        buffer.put(4.toByte()) // Type 4: ping
+        buffer.putLong(System.nanoTime())
+        touchExecutor.execute { writeRaw(buffer.array()) }
     }
 
     private fun updateStats(bytes: Int) {

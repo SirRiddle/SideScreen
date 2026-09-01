@@ -710,23 +710,47 @@ class StreamClient(
         Log.d(TAG, "Disconnected")
     }
 
+    private val cleanedUp = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Idempotent teardown of socket + both worker executors. The receive loop
+     * calls this from its own thread after an EOF/error — awaiting an executor's
+     * termination from its own thread would deadlock, so that executor is shut
+     * down but never awaited when running on itself.
+     */
     private fun cleanup() {
+        if (!cleanedUp.compareAndSet(false, true)) return
         try {
             outputStream?.close()
             inputStream?.close()
             socket?.close()
 
-            // Properly shutdown executor with timeout to prevent orphaned threads
+            val onTouchWorker = Thread.currentThread().name == "TouchThread"
+            val onReceiveWorker = Thread.currentThread().name == "ReceiveThread"
+
             touchExecutor.shutdown()
-            try {
-                if (!touchExecutor.awaitTermination(500, TimeUnit.MILLISECONDS)) {
+            if (!onTouchWorker) {
+                try {
+                    if (!touchExecutor.awaitTermination(500, TimeUnit.MILLISECONDS)) {
+                        touchExecutor.shutdownNow()
+                        touchExecutor.awaitTermination(200, TimeUnit.MILLISECONDS)
+                    }
+                } catch (e: InterruptedException) {
                     touchExecutor.shutdownNow()
-                    // Wait a bit more for forced shutdown
-                    touchExecutor.awaitTermination(200, TimeUnit.MILLISECONDS)
+                    Thread.currentThread().interrupt()
                 }
-            } catch (e: InterruptedException) {
+            } else {
                 touchExecutor.shutdownNow()
-                Thread.currentThread().interrupt()
+            }
+
+            // Receive executor: same rule, never self-await (liveness beats tidiness).
+            receiveExecutor.shutdown()
+            if (!onReceiveWorker) {
+                try {
+                    receiveExecutor.awaitTermination(300, TimeUnit.MILLISECONDS)
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error during cleanup", e)

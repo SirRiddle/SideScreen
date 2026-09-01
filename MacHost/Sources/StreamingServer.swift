@@ -171,6 +171,7 @@ class StreamingServer {
     /// Keyframes always pass — post-drop recovery needs one to land.
     private static let maxFrameSendAgeNs: UInt64 = 250_000_000
     private static let backlogRecoveryCooldownNs: UInt64 = 500_000_000
+    private var lastStaleDropLogNs: UInt64 = 0
     private var lastBacklogRecoveryNs: UInt64 = 0
     // Whether host wants to receive touch events from client. Ping/pong is
     // handled regardless. When false, incoming touch frames are dropped
@@ -830,7 +831,13 @@ class StreamingServer {
             if !isKeyframe && sendAge > Self.maxFrameSendAgeNs {
                 self.droppedFrames += 1
                 self.requestBacklogRecoveryIfDue()
-                debugLog("Dropped stale P-frame (\(sendAge / 1_000_000)ms old at send)")
+                // Congestion path: at most one log per second — anything more is
+                // spam precisely when the pipeline can least afford the I/O.
+                let nowNs = DispatchTime.now().uptimeNanoseconds
+                if nowNs &- lastStaleDropLogNs > 1_000_000_000 {
+                    lastStaleDropLogNs = nowNs
+                    debugLog("Dropped stale P-frame (\(sendAge / 1_000_000)ms old at send)")
+                }
                 return
             }
 

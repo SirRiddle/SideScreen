@@ -5,21 +5,60 @@ import ApplicationServices
 import os.log
 @preconcurrency import ScreenCaptureKit
 
-// Debug file logger - writes to /tmp/sidescreen.log
-func debugLog(_ message: String) {
-    let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-    let line = "[\(timestamp)] \(message)\n"
-    print(message)
-    if let data = line.data(using: .utf8) {
-        let url = URL(fileURLWithPath: "/tmp/sidescreen.log")
-        if let handle = try? FileHandle(forWritingTo: url) {
-            handle.seekToEndOfFile()
-            handle.write(data)
-            handle.closeFile()
-        } else {
-            try? data.write(to: url)
+// Debug file logger — asynchronous, bounded, batched. Callers (including
+// per-frame/congestion paths) never touch disk; a background thread flushes a
+// 64KB line buffer on a 250ms cadence. Drops (overflow) are counted and the
+// count itself is flushed so gaps are visible in the file.
+private enum DebugLogSink {
+    private static let queue = DispatchQueue(label: "debugLog", qos: .utility)
+    private static var pending = Data()
+    private static var overflowDrops = 0
+    private static let maxPendingBytes = 64 * 1024
+    private static var flushScheduled = false
+    private static let url = URL(fileURLWithPath: "/tmp/sidescreen.log")
+
+    static func write(_ line: String) {
+        queue.async {
+            if overflowDrops > 0 {
+                if pending.count < maxPendingBytes {
+                    pending.append(Data("[logger] dropped \(overflowDrops) lines under pressure\n".utf8))
+                }
+                overflowDrops = 0
+            }
+            let bytes = Data(line.utf8)
+            if pending.count + bytes.count > maxPendingBytes {
+                overflowDrops += 1
+            } else {
+                pending.append(bytes)
+            }
+            scheduleFlushLocked()
         }
     }
+
+    private static func scheduleFlushLocked() {
+        if flushScheduled { return }
+        flushScheduled = true
+        queue.asyncAfter(deadline: .now() + .milliseconds(250)) {
+            flushScheduled = false
+            guard !pending.isEmpty else { return }
+            let payload = pending
+            pending = Data()
+            let handle = try? FileHandle(forWritingTo: url)
+            if let handle {
+                handle.seekToEndOfFile()
+                handle.write(payload)
+                try? handle.close()
+            } else {
+                try? payload.write(to: url)
+            }
+        }
+    }
+}
+
+func debugLog(_ message: String) {
+    let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+    print(message)
+    DebugLogSink.write("[\(timestamp)] \(message)\n")
 }
 
 // MARK: - Gesture State Machine

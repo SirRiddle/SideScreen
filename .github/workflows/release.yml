@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - '[0-9]*'
+  # Manual trigger: lets the fork owner cut the release after enabling Actions,
+  # re-run a failed build, or release without re-pushing a tag.
+  workflow_dispatch:
 
 permissions:
   contents: write

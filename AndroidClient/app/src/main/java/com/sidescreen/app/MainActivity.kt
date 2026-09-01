@@ -1117,6 +1117,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Overlay latency line: round-trip time, plus the decoder's measured
+     * receive→surface-rendered average when streaming (0 until first frame).
+     * Deliberately labeled per stage — no fake "glass-to-glass" number.
+     */
+    private fun latencyLine(rttMs: Double): String {
+        val surface = videoDecoder?.averageSurfaceRenderedMs() ?: 0f
+        return if (surface > 0f) {
+            String.format("%.1f / %.1f ms", rttMs, surface)
+        } else {
+            String.format("%.1f / -- ms", rttMs)
+        }
+    }
+
+    /**
      * Adaptive touch-prediction horizon: half the measured RTT (one-way transit)
      * + average in-codec decode time + one panel frame. Clamped: too short
      * under-compensates, too long overshoots on direction changes.
@@ -1149,7 +1163,7 @@ class MainActivity : AppCompatActivity() {
         streamClient?.onLatencyMeasured = { rttMs ->
             runOnUiThread {
                 lastRttMs = rttMs.toFloat()
-                binding.latencyText.text = String.format("%.1f ms", rttMs)
+                binding.latencyText.text = latencyLine(rttMs)
             }
         }
         streamClient?.onConnectionStatus = { connected ->
@@ -1419,7 +1433,7 @@ class MainActivity : AppCompatActivity() {
                 streamClient?.onLatencyMeasured = { rttMs ->
                     runOnUiThread {
                         lastRttMs = rttMs.toFloat()
-                        binding.latencyText.text = String.format("%.1f ms", rttMs)
+                        binding.latencyText.text = latencyLine(rttMs)
                     }
                 }
                 streamClient?.onConnectionStatus = { connected ->

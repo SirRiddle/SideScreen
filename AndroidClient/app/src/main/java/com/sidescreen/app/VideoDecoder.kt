@@ -62,6 +62,12 @@ class VideoDecoder(
     /** EWMA of in-codec latency, fed from each successfully measured output. */
     @Volatile private var decodeLatencyAvgMs = 0f
 
+    /** EWMA of receive→surface-rendered latency, from OnFrameRenderedListener. */
+    @Volatile private var surfaceLatencyAvgMs = 0f
+
+    /** Average receive→surface latency in ms (0 until the first rendered frame). */
+    fun averageSurfaceRenderedMs(): Float = surfaceLatencyAvgMs
+
     /** Average in-codec latency in ms (0 until first measured frame). */
     fun averageDecodeLatencyMs(): Float = decodeLatencyAvgMs
 
@@ -146,6 +152,25 @@ class VideoDecoder(
                 }
             }
         codec.setCallback(callback, decoderHandler)
+        // Truthful "surface rendered" timing: fired when an output buffer actually
+        // lands on the Surface. nanoTime aligns with the recv-complete PTS we stamp
+        // into queueInputBuffer, so the delta is receive→rendered. May arrive
+        // batched/late on some drivers — still the best render-side signal.
+        codec.setOnFrameRenderedListener(
+            MediaCodec.OnFrameRenderedListener { _, presentationTimeUs, renderTimeNanos ->
+                val latencyNs = renderTimeNanos - presentationTimeUs * 1000L
+                if (latencyNs in 0..MAX_REASONABLE_LATENCY_NS) {
+                    val ms = latencyNs / 1_000_000f
+                    surfaceLatencyAvgMs =
+                        if (surfaceLatencyAvgMs == 0f) {
+                            ms
+                        } else {
+                            surfaceLatencyAvgMs * 0.9f + ms * 0.1f
+                        }
+                }
+            },
+            decoderHandler,
+        )
 
         val format =
             MediaFormat.createVideoFormat(

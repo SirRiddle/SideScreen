@@ -910,6 +910,15 @@ struct SettingsView: View {
                                             .font(.system(size: 16, weight: .semibold))
                                             .foregroundColor(.accentColor)
                                     }
+                                    Spacer()
+                                    VStack(alignment: .leading) {
+                                        Text("Frame age")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary)
+                                        Text(String(format: "%.1f ms", settings.currentFrameAgeMs))
+                                            .font(.system(size: 16, weight: .semibold))
+                                            .foregroundColor(.orange)
+                                    }
                                 }
                             }
                         }
@@ -1298,6 +1307,8 @@ class DisplaySettings: ObservableObject {
     @Published var isRunning = false
     @Published var currentFPS: Double = 0
     @Published var currentBitrate: Double = 0
+    /// Average capture→send pipeline age (ms) as reported by the server.
+    @Published var currentFrameAgeMs: Double = 0
     @Published var captureMethod: String = "Initializing..."
 
     var onToggleServer: (() -> Void)?

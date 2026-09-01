@@ -160,7 +160,7 @@ class StreamingServer {
     var onCodecNegotiated: ((StreamCodec) -> Void)?
     // Touch callback: (x1, y1, action, pointerCount, x2, y2)
     var onTouchEvent: ((Float, Float, Int, Int, Float, Float) -> Void)?
-    var onStats: ((Double, Double) -> Void)?
+    var onStats: ((Double, Double, Double) -> Void)?
     var onKeyframeRequested: ((Bool) -> Void)?
     /// Fired (rate-limited) when stale P-frames were dropped on a congested
     /// uplink so the capture side can force a fresh IDR and resync the client.
@@ -933,11 +933,11 @@ class StreamingServer {
         if elapsed >= 1.0 {
             let mbps = Double(bytesSent * 8) / elapsed / 1_000_000
             let fps = Double(frameCount) / elapsed
-            onStats?(fps, mbps)
+            let avgAgeMs = profiledFrameCount > 0 ? Double(totalFrameAgeNs) / Double(profiledFrameCount) / 1_000_000.0 : 0
+            onStats?(fps, mbps, avgAgeMs)
 
             // Log pipeline latency profile
             if profiledFrameCount > 0 {
-                let avgAgeMs = Double(totalFrameAgeNs) / Double(profiledFrameCount) / 1_000_000.0
                 debugLog("Pipeline: \(String(format: "%.1f", fps))fps, \(String(format: "%.1f", mbps))Mbps, avg frame age: \(String(format: "%.1f", avgAgeMs))ms, dropped: \(droppedFrames)")
             }
 

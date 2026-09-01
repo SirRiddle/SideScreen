@@ -750,11 +750,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.handleTouch(x: x, y: y, action: action, pointerCount: pointerCount, x2: x2, y2: y2)
             }
 
-            streamingServer?.onStats = { [weak self] fps, mbps in
+            streamingServer?.onStats = { [weak self] fps, mbps, frameAgeMs in
                 let captured = self
                 Task { @MainActor in
                     captured?.settings.currentFPS = fps
                     captured?.settings.currentBitrate = mbps
+                    captured?.settings.currentFrameAgeMs = frameAgeMs
                 }
             }
 
@@ -848,6 +849,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         settings.currentWirelessDevice = nil
         settings.currentFPS = 0
         settings.currentBitrate = 0
+        settings.currentFrameAgeMs = 0
     }
 
     func stopServer() {

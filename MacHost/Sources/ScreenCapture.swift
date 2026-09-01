@@ -508,11 +508,13 @@ class ScreenCapture {
 
         Task {
             do {
-                if audioEnabled, let cfg = streamConfig, let stream, !cfg.capturesAudio {
-                    // Belt and braces: the config may have been (re)built or copied
-                    // since the toggle was armed. Sync it regardless of ordering.
+                if audioEnabled, let cfg = streamConfig, let stream {
+                    // updateConfiguration is unconditional: the retained config
+                    // object is our copy — only this call pushes it into the
+                    // stream, and skipping it silently zeroes the audio path.
                     cfg.capturesAudio = true
                     try await stream.updateConfiguration(cfg)
+                    debugLog("Audio capture enabled at start (updateConfiguration)")
                 }
                 try await stream?.startCapture()
                 debugLog("SCStream capture started — starting frame flow monitor (3s interval, 5s timeout)")

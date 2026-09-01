@@ -413,6 +413,15 @@ class StreamClient(
         }
     }
 
+    private var audioMarkerLogged = false
+
+    private fun singleShotAudioMarker() {
+        if (!audioMarkerLogged) {
+            audioMarkerLogged = true
+            diagLog("First audio frame received (type 14)")
+        }
+    }
+
     private fun advertiseAudioSupport() {
         outputStream?.let { out ->
             out.writeByte(MESSAGE_CLIENT_SUPPORTS_AUDIO)
@@ -512,6 +521,9 @@ class StreamClient(
                             input.readLong() // capture ns — Mac uptime clock, not comparable here
                             val au = ByteArray(audioSize)
                             input.readFully(au)
+                            if (au.isNotEmpty()) {
+                                singleShotAudioMarker()
+                            }
                             onAudioFrame?.invoke(au, audioSize)
                         }
 

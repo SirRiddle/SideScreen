@@ -88,6 +88,12 @@ class MainActivity : AppCompatActivity() {
     /** Once-per-session guard for the decoder-stall auto-recovery path. */
     private var stallRecoveryAttempted = false
 
+    /** User pressed Disconnect — suppresses auto-reconnect until the next explicit Connect. */
+    private var userInitiatedDisconnect = false
+
+    /** In-flight involuntary-drop reconnect loop. */
+    private var reconnectJob: kotlinx.coroutines.Job? = null
+
     /** Restored into WindowManager attrs on disconnect (0 = was not overridden). */
     private var savedDisplayModeId = 0
 
@@ -402,6 +408,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupUI() {
         binding.connectButton.setOnClickListener {
+            userInitiatedDisconnect = false
             var host =
                 binding.hostInput.text
                     .toString()
@@ -1202,6 +1209,7 @@ class MainActivity : AppCompatActivity() {
                         log("📋 Restarting checklist updates")
                         startChecklistUpdates()
                     }
+                    maybeScheduleReconnect()
                 }
             }
         }
@@ -1467,6 +1475,7 @@ class MainActivity : AppCompatActivity() {
 
                             // Restart checklist updates immediately
                             log("📋 Restarting checklist updates")
+                            maybeScheduleReconnect()
                             startChecklistUpdates()
                         }
                     }
@@ -1533,8 +1542,46 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Involuntary-drop recovery: a Mac-side restart (Gaming Boost toggle, mode
+     * switch) or brief network flap tears down the socket; retry the same
+     * transport with 750ms spacing until the user intervenes or it succeeds.
+     */
+    private fun maybeScheduleReconnect() {
+        if (userInitiatedDisconnect) return
+        if (reconnectJob?.isActive == true) return
+        if (prefs.connectionMode == ConnectionMode.WIRELESS && pairedHostStorage.load() == null) return
+        reconnectJob =
+            lifecycleScope.launch {
+                updateStatus("Reconnecting…")
+                var attempt = 0
+                while (attempt < 12 && !isConnected && !userInitiatedDisconnect) {
+                    attempt++
+                    kotlinx.coroutines.delay(750)
+                    if (isConnected || userInitiatedDisconnect) break
+                    if (prefs.connectionMode == ConnectionMode.USB) {
+                        binding.connectButton.performClick()
+                    } else {
+                        wirelessController.reconnectNow()
+                    }
+                    var waited = 0
+                    while (!isConnected && waited < 3000 && !userInitiatedDisconnect) {
+                        kotlinx.coroutines.delay(250)
+                        waited += 250
+                    }
+                    if (isConnected) break
+                }
+                if (!isConnected && !userInitiatedDisconnect) {
+                    updateStatus("Couldn't reconnect — tap Connect")
+                }
+            }
+    }
+
     private fun disconnect() {
         stopPingTimer()
+        userInitiatedDisconnect = true
+        reconnectJob?.cancel()
+        reconnectJob = null
         streamClient?.disconnect()
         // Reset display config so next connect defers decoder init until config arrives
         displayWidth = 0

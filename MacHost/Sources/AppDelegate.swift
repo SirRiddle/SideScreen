@@ -246,12 +246,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .dropFirst() // Skip initial value
             .sink { [weak self] gamingBoost in
                 guard let self = self, self.settings.isRunning else { return }
-                print("🎮 Gaming Boost \(gamingBoost ? "ENABLED" : "DISABLED")")
-                self.screenCapture?.updateEncoderSettings(
-                    bitrateMbps: self.settings.effectiveBitrate,
-                    quality: self.settings.effectiveQuality,
-                    gamingBoost: gamingBoost
-                )
+                debugLog("🎮 Gaming Boost \(gamingBoost ? "ENABLED" : "DISABLED") — full pipeline restart so display, capture, and encoder agree on the effective rate")
+                // Encoder-only rebuild lied about 120 Hz (the virtual display kept
+                // its original rate). Rebuild the whole chain; the client
+                // auto-reconnects and resumes in one motion.
+                self.stopServer()
+                Task {
+                    // Let the WindowServer settle after the display disappears.
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    await self.startServer()
+                }
             }
             .store(in: &cancellables)
 
@@ -616,7 +620,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             try virtualDisplayManager?.createDisplay(
                 width: size.width,
                 height: size.height,
-                refreshRate: settings.refreshRate,
+                refreshRate: settings.effectiveRefreshRate,
                 hiDPI: settings.hiDPI,
                 name: "SideScreen"
             )

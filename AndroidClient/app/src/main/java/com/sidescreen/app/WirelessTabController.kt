@@ -74,15 +74,18 @@ class WirelessTabController(
             storage.clear()
             transition(State.FIRST_TIME)
         }
-        views.reconnectButton.setOnClickListener {
-            val entry =
-                storage.load() ?: run {
-                    transition(State.FIRST_TIME)
-                    return@setOnClickListener
-                }
-            showConnecting("Reconnecting to ${entry.macName}", "${entry.host}:${entry.port}")
-            attemptAutoConnect(entry)
-        }
+        views.reconnectButton.setOnClickListener { reconnectNow() }
+    }
+
+    /** Same as the Reconnect button; used by the involuntary-drop auto-reconnect loop. */
+    fun reconnectNow() {
+        val entry =
+            storage.load() ?: run {
+                transition(State.FIRST_TIME)
+                return
+            }
+        showConnecting("Reconnecting to ${entry.macName}", "${entry.host}:${entry.port}")
+        attemptAutoConnect(entry)
     }
 
     /**

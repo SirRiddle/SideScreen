@@ -30,6 +30,7 @@ enum GestureState {
     case scrolling        // 1-finger scroll
     case longPressReady   // Long press detected, waiting for drag or release
     case dragging         // Long press + drag (left mouse drag)
+    case penDrawing       // Pen mode: 1-pointer stroke (mouse down on touch, no long press)
     case twoFingerScroll  // 2-finger scroll
     case pinching         // Pinch zoom
 }
@@ -248,6 +249,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if !enabled {
                     self.cancelActiveRemoteGesture()
                 }
+            }
+            .store(in: &cancellables)
+
+        // Toggling pen mode mid-gesture must not strand the gesture state machine
+        // (pen paths guard on .penDrawing, so a stale .pending/.scrolling would otherwise
+        // persist until the next touch down). Release + reset on either toggle direction.
+        settings.$penModeEnabled
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.cancelActiveRemoteGesture()
             }
             .store(in: &cancellables)
 
@@ -815,6 +826,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // Double tap tracking
     private var lastTapTime: UInt64 = 0
     private var lastTapPosition: CGPoint = .zero
+    /// Click count of the pen press currently held down, so its release can match it.
+    private var penClickState: Int64 = 1
 
     // Long press timer
     private var longPressTimer: DispatchWorkItem?
@@ -834,8 +847,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func cancelActiveRemoteGesture() {
         cancelLongPressTimer()
         stopMomentumScroll()
-        if gestureState == .dragging {
+        if gestureState == .dragging || gestureState == .penDrawing {
             injectMouseUp(at: touchLastPosition)
+            penClickState = 1
+            lastTapTime = 0
         }
         gestureState = .idle
     }
@@ -870,6 +885,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         if pointerCount >= 2 {
             handleTwoFingerTouch(p1: p1, p2: p2, action: action)
+        } else if settings.penModeEnabled {
+            // Pen mode: single pointer draws directly. 2-finger gestures above are
+            // untouched, so scroll/pinch still work for panning and zooming a canvas.
+            handlePenTouch(at: p1, action: action)
         } else {
             handleOneFingerTouch(at: p1, action: action)
         }
@@ -884,6 +903,87 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case 2: oneFingerUp(at: point)
         default: break
         }
+    }
+
+    // MARK: - Pen / Draw Mode (1 pointer, direct pointer semantics)
+
+    /// Pen mode maps one pointer straight onto the left mouse button: down → drag → up,
+    /// with no long-press wait and no scroll interpretation, so a stroke produces a
+    /// continuous line in drawing apps. A tap is still a plain click (down + up).
+    private func handlePenTouch(at point: CGPoint, action: Int) {
+        switch action {
+        case 0: penDown(at: point)
+        case 1: penMove(to: point)
+        case 2: penUp(at: point)
+        default: break
+        }
+    }
+
+    private func penDown(at point: CGPoint) {
+        stopMomentumScroll()
+        cancelLongPressTimer()
+        // A previous stroke can still be open if its up event never arrived (client
+        // dropped mid-stroke); never stack two downs without an up in between.
+        cancelActiveRemoteGesture()
+
+        touchStartPosition = point
+        touchLastPosition = point
+        touchStartTime = DispatchTime.now().uptimeNanoseconds
+        gestureState = .penDrawing
+
+        // A press has to declare its click count up front: a second tap that lands close
+        // enough to the first, soon enough after it, is click 2 of a double click. The
+        // trackpad path decides this on mouse-up because it buffers the whole tap; pen
+        // mode presses on contact, so the decision moves here.
+        let doubleTapWindow = touchStartTime - lastTapTime < GestureThresholds.doubleTapMaxTime
+        let doubleTapReach = hypot(point.x - lastTapPosition.x, point.y - lastTapPosition.y)
+            < GestureThresholds.doubleTapMaxDistance
+        penClickState = (lastTapTime != 0 && doubleTapWindow && doubleTapReach) ? 2 : 1
+
+        // Park the cursor on the contact point first so the app sees the press where
+        // the pen actually is, then press immediately (no long-press threshold).
+        moveCursor(to: point)
+        injectMouseDown(at: point, clickState: penClickState)
+    }
+
+    private func penMove(to point: CGPoint) {
+        guard gestureState == .penDrawing else { return }
+
+        // Same input-rate cap as the trackpad path (~120Hz); above that the extra
+        // samples only cost CGEvent posts.
+        let now = DispatchTime.now().uptimeNanoseconds
+        if now - lastTouchTime < GestureThresholds.minTouchInterval { return }
+        lastTouchTime = now
+
+        injectMouseDragged(to: point)
+
+        touchLastPosition = point
+    }
+
+    private func penUp(at point: CGPoint) {
+        // .dragging is possible if the mode was switched on mid-stroke — release either way,
+        // a stuck left button would be worse than a lost stroke.
+        guard gestureState == .penDrawing || gestureState == .dragging else { return }
+        // Match the click count of the press. Without it the release reads as a
+        // half-formed click and controls that act on mouse-up ignore it.
+        injectMouseUp(at: point, clickState: penClickState)
+        gestureState = .idle
+
+        // Only a short, stationary contact can start or continue a double tap; a drawn
+        // stroke that happens to end near an earlier tap must not chain into one.
+        let now = DispatchTime.now().uptimeNanoseconds
+        let travelled = hypot(point.x - touchStartPosition.x, point.y - touchStartPosition.y)
+        let wasTap = travelled < GestureThresholds.tapMaxDistance
+            && now - touchStartTime < GestureThresholds.tapMaxTime
+
+        if wasTap && penClickState == 1 {
+            lastTapTime = now
+            lastTapPosition = point
+        } else {
+            // Reset after click 2 as well, so a third tap doesn't ride the same window.
+            lastTapTime = 0
+        }
+        penClickState = 1
     }
 
     private func oneFingerDown(at point: CGPoint) {
@@ -950,7 +1050,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 lastScrollDeltaY = sy
             }
 
-        case .dragging:
+        case .dragging, .penDrawing:
+            // .penDrawing only lands here if pen mode was switched off mid-stroke; keep
+            // feeding drags so the button that is still down doesn't sit in one spot.
             injectMouseDragged(to: point)
 
         default:
@@ -1004,7 +1106,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
-        case .dragging:
+        case .dragging, .penDrawing:
+            // .penDrawing only lands here if the mode was switched off mid-stroke.
             injectMouseUp(at: point)
 
         default:
@@ -1113,9 +1216,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func injectMouseDown(at point: CGPoint) {
+    private func injectMouseDown(at point: CGPoint, clickState: Int64 = 1) {
         if let event = CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left) {
-            event.setIntegerValueField(.mouseEventClickState, value: 1)
+            event.setIntegerValueField(.mouseEventClickState, value: clickState)
             event.post(tap: .cghidEventTap)
         }
     }
@@ -1126,8 +1229,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func injectMouseUp(at point: CGPoint) {
+    /// `clickState` defaults to 0 so the existing drag paths post exactly the event they
+    /// always have; only taps that need to read as a complete click pass 1.
+    private func injectMouseUp(at point: CGPoint, clickState: Int64 = 0) {
         if let event = CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left) {
+            if clickState > 0 {
+                event.setIntegerValueField(.mouseEventClickState, value: clickState)
+            }
             event.post(tap: .cghidEventTap)
         }
     }

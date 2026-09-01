@@ -98,14 +98,14 @@ echo ""
 
 # Setup ADB reverse (with retry)
 echo "🔧 Setting up USB port forwarding..."
-adb reverse --remove tcp:8888 2>/dev/null || true
+adb reverse --remove tcp:54321 2>/dev/null || true
 sleep 0.5
-adb reverse tcp:8888 tcp:8888
+adb reverse tcp:54321 tcp:54321
 
 # Verify ADB reverse is active
 echo "🔍 Verifying port forwarding..."
-if adb reverse --list | grep -q "tcp:8888"; then
-    echo "  ✓ Port 8888 forwarded successfully"
+if adb reverse --list | grep -q "tcp:54321"; then
+    echo "  ✓ Port 54321 forwarded successfully"
 else
     echo "  ⚠️  Port forwarding setup but verification failed"
     echo "  Run './scripts/setup-usb.sh' if connection issues occur"
@@ -123,6 +123,6 @@ echo "  3. Tap Connect"
 echo ""
 echo "💡 Troubleshooting:"
 echo "  • Connection fails: ./scripts/setup-usb.sh"
-echo "  • Check server: lsof -i :8888"
+echo "  • Check server: lsof -i :54321"
 echo "  • Check forwarding: adb reverse --list"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

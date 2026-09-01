@@ -1747,7 +1747,7 @@ class MainActivity : AppCompatActivity() {
     /**
      * Check if Mac server is actually running (not just ADB reverse)
      *
-     * Problem: When `adb reverse tcp:8888 tcp:8888` is active, ADB daemon listens on port 8888.
+     * Problem: When `adb reverse` is active, the ADB daemon listens on the forwarded port (default 54321).
      * A simple socket connect will succeed to ADB daemon, not the actual Mac server.
      *
      * Solution: After connecting, try to read data with a short timeout.

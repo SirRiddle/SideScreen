@@ -35,8 +35,8 @@ echo ""
 # Setup USB if device connected
 if adb devices 2>/dev/null | grep -q "device$"; then
     echo "📱 Android device detected, setting up USB..."
-    adb reverse --remove tcp:8888 2>/dev/null || true
-    adb reverse tcp:8888 tcp:8888
+    adb reverse --remove tcp:54321 2>/dev/null || true
+    adb reverse tcp:54321 tcp:54321
     echo "  ✓ Port forwarding ready"
 fi
 

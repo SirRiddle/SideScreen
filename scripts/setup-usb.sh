@@ -24,11 +24,11 @@ adb reverse --remove-all 2>/dev/null || true
 sleep 0.5
 
 # Setup new reverse
-echo "  Setting up port 8888..."
-adb reverse tcp:8888 tcp:8888
+echo "  Setting up Port 54321..."
+adb reverse tcp:54321 tcp:54321
 
 # Verify
-if adb reverse --list | grep -q "tcp:8888"; then
+if adb reverse --list | grep -q "tcp:54321"; then
     echo ""
     echo "✅ USB port forwarding active!"
     echo ""

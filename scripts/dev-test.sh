@@ -82,7 +82,7 @@ echo "[5/5] Starting macOS app..."
 pkill -f "SideScreen.app" 2>/dev/null || true
 sleep 0.5
 
-adb reverse tcp:8888 tcp:8888 2>/dev/null || true
+adb reverse tcp:54321 tcp:54321 2>/dev/null || true
 open "$APP_DIR"
 
 echo ""

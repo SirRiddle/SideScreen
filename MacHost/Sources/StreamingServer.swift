@@ -157,6 +157,16 @@ class StreamingServer {
     var onTouchEvent: ((Float, Float, Int, Int, Float, Float) -> Void)?
     var onStats: ((Double, Double) -> Void)?
     var onKeyframeRequested: ((Bool) -> Void)?
+    /// Fired (rate-limited) when stale P-frames were dropped on a congested
+    /// uplink so the capture side can force a fresh IDR and resync the client.
+    var onBacklogRecoveryNeeded: (() -> Void)?
+
+    /// Non-keyframes older than this at send time are dropped: the client is
+    /// already ~15+ frames behind at 60fps, so the picture would be useless.
+    /// Keyframes always pass — post-drop recovery needs one to land.
+    private static let maxFrameSendAgeNs: UInt64 = 250_000_000
+    private static let backlogRecoveryCooldownNs: UInt64 = 500_000_000
+    private var lastBacklogRecoveryNs: UInt64 = 0
     // Whether host wants to receive touch events from client. Ping/pong is
     // handled regardless. When false, incoming touch frames are dropped
     // immediately without parsing or dispatching to main queue.
@@ -249,6 +259,9 @@ class StreamingServer {
         do {
             let params = NWParameters.tcp
             params.allowLocalEndpointReuse = true
+            // Video traffic class: DSCP/WMM video-AC marking cuts 1–20ms of queueing
+            // jitter on contended WiFi; no-op on the adb-reverse loopback path.
+            params.serviceClass = .interactiveVideo
 
             // Optimize TCP for low-latency streaming
             if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
@@ -803,10 +816,18 @@ class StreamingServer {
             debugLog("First keyframe sent to new client")
         }
 
-        // No frame-age dropping or backpressure — send everything immediately.
-        // The encode queue depth limit (2 pending) in ScreenCapture handles flow control.
+        // Bounded by age: under sustained uplink congestion NWConnection would
+        // otherwise buffer unboundedly and show the user increasingly stale video.
         frameQueue.async { [weak self] in
             guard let self = self else { return }
+
+            let sendAge = DispatchTime.now().uptimeNanoseconds - timestamp
+            if !isKeyframe && sendAge > Self.maxFrameSendAgeNs {
+                self.droppedFrames += 1
+                self.requestBacklogRecoveryIfDue()
+                debugLog("Dropped stale P-frame (\(sendAge / 1_000_000)ms old at send)")
+                return
+            }
 
             let packet = self.makeFramePacket(data, timestamp: timestamp, isKeyframe: isKeyframe)
 
@@ -817,9 +838,16 @@ class StreamingServer {
             })
 
             // Track frame age at send time for pipeline profiling
-            let sendAge = DispatchTime.now().uptimeNanoseconds - timestamp
             self.updateStats(bytes: data.count, frameAgeNs: sendAge)
         }
+    }
+
+    /// frameQueue-confined: at most one recovery IDR request per cooldown window.
+    private func requestBacklogRecoveryIfDue() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now &- lastBacklogRecoveryNs > Self.backlogRecoveryCooldownNs else { return }
+        lastBacklogRecoveryNs = now
+        onBacklogRecoveryNeeded?()
     }
 
     private func makeFramePacket(_ data: Data, timestamp: UInt64, isKeyframe: Bool) -> Data {

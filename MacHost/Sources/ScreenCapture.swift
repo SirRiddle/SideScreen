@@ -349,7 +349,7 @@ class ScreenCapture {
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         config.showsCursor = true
-        config.queueDepth = 4
+        config.queueDepth = 2
         config.capturesAudio = false
         config.backgroundColor = .clear
         config.scalesToFit = false
@@ -371,6 +371,10 @@ class ScreenCapture {
 
         streamOutput?.onFrameReceived = { [weak self] sampleBuffer in
             guard let self = self else { return }
+            // Earliest userland sight of the frame: this stamp (not encode() entry)
+            // is what makes downstream frame-age stats capture vsync-wait, SCK
+            // queue residence, and encode backlog.
+            let frameArrivalNanos = DispatchTime.now().uptimeNanoseconds
 
             // Thread-safe update of frame monitor state
             let isFirst = self.stateLock.withLock { state -> Bool in
@@ -389,9 +393,11 @@ class ScreenCapture {
 
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
-            // Backpressure: skip if encode queue already has 2+ frames pending
+            // Backpressure: skip if encode queue already has a frame pending — a second slot would only
+            // hold stale video (VT RealTime drops internally anyway, so the extra
+            // buffer bought latency, not resilience)
             let pending = OSAtomicAdd32(0, &self.pendingEncodes)
-            if pending >= 2 {
+            if pending >= 1 {
                 return
             }
 
@@ -399,13 +405,13 @@ class ScreenCapture {
                 self.lastPixelBuffer = imageBuffer
                 OSAtomicIncrement32(&self.pendingEncodes)
                 queue.async {
-                    self.encoder?.encode(pixelBuffer: imageBuffer, presentationTimeStamp: pts)
+                    self.encoder?.encode(pixelBuffer: imageBuffer, presentationTimeStamp: pts, captureNanos: frameArrivalNanos)
                     OSAtomicDecrement32(&self.pendingEncodes)
                 }
             } else if let cached = self.lastPixelBuffer {
                 OSAtomicIncrement32(&self.pendingEncodes)
                 queue.async {
-                    self.encoder?.encode(pixelBuffer: cached, presentationTimeStamp: pts)
+                    self.encoder?.encode(pixelBuffer: cached, presentationTimeStamp: pts, captureNanos: frameArrivalNanos)
                     OSAtomicDecrement32(&self.pendingEncodes)
                 }
             }

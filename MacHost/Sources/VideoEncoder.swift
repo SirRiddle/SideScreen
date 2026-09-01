@@ -134,15 +134,18 @@ class VideoEncoder {
         stateLock.withLock { $0.pendingForceKeyframe = true }
     }
 
-    func encode(pixelBuffer: CVPixelBuffer, presentationTimeStamp: CMTime) {
+    func encode(pixelBuffer: CVPixelBuffer, presentationTimeStamp: CMTime, captureNanos: UInt64? = nil) {
         guard let session = compressionSession else { return }
 
         let duration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
 
-        // Use system uptime clock — MUST match DispatchTime.now().uptimeNanoseconds
-        let captureNanos = DispatchTime.now().uptimeNanoseconds
+        // Uptime clock — MUST match DispatchTime.now().uptimeNanoseconds. Callers
+        // in the SCStream path pass the frame's arrival time so downstream
+        // frame-age stats include capture-queue residence, not just encode→send;
+        // keepalive/fallback callers omit it and are stamped at encode entry.
+        let frameAgeOrigin = captureNanos ?? DispatchTime.now().uptimeNanoseconds
         let refconValue = UnsafeMutableRawPointer.allocate(byteCount: 8, alignment: 8)
-        refconValue.storeBytes(of: captureNanos, as: UInt64.self)
+        refconValue.storeBytes(of: frameAgeOrigin, as: UInt64.self)
 
         let shouldForceKeyframe = stateLock.withLock { state -> Bool in
             guard state.pendingForceKeyframe else { return false }

@@ -679,6 +679,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             streamingServer?.onKeyframeRequested = { [weak self] force in
                 self?.screenCapture?.requestKeyframeOrReplayCachedFrame(force: force)
             }
+            streamingServer?.onBacklogRecoveryNeeded = { [weak self] in
+                self?.screenCapture?.requestKeyframeOrReplayCachedFrame(force: true)
+            }
 
             streamingServer?.onClientDisconnected = { [weak self] in
                 guard let self = self else { return }

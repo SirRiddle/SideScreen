@@ -42,6 +42,9 @@ class ScreenCapture {
     func setAudioEnabled(_ enabled: Bool) {
         guard enabled != audioEnabled else { return }
         audioEnabled = enabled
+        // Always write the retained config: arming before Start would otherwise
+        // be silently lost (the stream is created before streaming begins).
+        streamConfig?.capturesAudio = enabled
         guard isStreaming, let stream else { return }
         Task { [stream] in
             do {
@@ -505,6 +508,12 @@ class ScreenCapture {
 
         Task {
             do {
+                if audioEnabled, let cfg = streamConfig, let stream, !cfg.capturesAudio {
+                    // Belt and braces: the config may have been (re)built or copied
+                    // since the toggle was armed. Sync it regardless of ordering.
+                    cfg.capturesAudio = true
+                    try await stream.updateConfiguration(cfg)
+                }
                 try await stream?.startCapture()
                 debugLog("SCStream capture started — starting frame flow monitor (3s interval, 5s timeout)")
                 startFrameMonitor()

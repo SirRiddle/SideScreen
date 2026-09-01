@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+<a id="0.12.1"></a>
+## [0.12.1] - 2026-09-01
+
+Hotfix + features, device-validated. Fixes a frozen-picture regression that shipped in 0.12.0, adds audio routing to the tablet, and expands bitrate options.
+
+### Added
+- **Audio Output setting (Mac settings → Streaming Settings).** Pick where audio from apps on the SideScreen display plays: Mac (default) or Tablet. When Tablet is selected, app audio streams as low-latency AAC to the tablet's speaker — toggleable mid-session with no restart. Wire-compatible in both directions: older clients simply never receive audio (protocol-gated opt-in).
+- **More bitrate presets.** 11 presets (100–5000 Mbps) instead of 5, alongside the existing 20–5000 slider.
+
+### Fixed
+- **Frozen picture after connecting (regression in 0.12.0).** Over-tightened capture queues starved ScreenCaptureKit on HiDPI/120Hz setups — SCK delivered one frame then silence, leaving a still image refreshed only by keepalives. Reverted to the proven queue sizes; verified on-device at 65–85 fps with 0 dropped frames.
+
+---
+
 <a id="0.12.0"></a>
 ## [0.12.0] - 2026-09-01
 

@@ -1790,8 +1790,9 @@ class MainActivity : AppCompatActivity() {
                 updateChecklistItem(binding.checkUsbConnected, isUsbConnected || isServerRunning)
 
                 // Update main status indicator based on all checklist items
-                val allReady = isDeveloperModeEnabled && isAdbEnabled && isServerRunning &&
-                    (isUsbConnected || isServerRunning)
+                val allReady =
+                    isDeveloperModeEnabled && isAdbEnabled && isServerRunning &&
+                        (isUsbConnected || isServerRunning)
                 updateMainStatus(allReady)
             }
         }

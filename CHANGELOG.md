@@ -9,13 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Removed
-- **Audio output experiment withdrawn.** The 0.12.1 "Audio Output" toggle (SCK app-audio capture + an in-progress HAL virtual audio driver) never reached a working, shippable state; the entire audio path — toggle, capture, wire types 14/15 (retired, never reusable), and Android player — is removed. Audio plays on the Mac, as before 0.12.1.
-
 ### Planned
 - mDNS auto-discovery for wireless mode
 - Multi-touch gestures
 - Stylus/pen support
+
+---
+
+<a id="0.12.2"></a>
+## [0.12.2] - 2026-09-01
+
+Withdrawal + reliability hotfix. Removes the audio work that never became functional, and hardens the USB connect checklist that falsely reported "cable not connected" / "server not ready".
+
+### Removed
+- **Audio output experiment withdrawn.** The 0.12.1 "Audio Output" toggle (SCK app-audio capture + an in-progress HAL virtual audio driver for true output-device switching) never reached a working state; the entire audio path — toggle, capture, wire types 14/15 (retired, never reusable), and Android player — is removed. Audio plays on the Mac, as before 0.12.1.
+
+### Fixed
+- **USB checklist falsely red while everything works.** The "USB cable connected" row trusted the battery-is-charging heuristic, which lies on tablets with charge management; the row and the ready status now also accept a live Mac-server probe as proof. The probe itself was racing the server's 100ms capability window — it now signals protocol support first and waits 700ms instead of failing at 200ms, and while a session is up, the status reads "Connected" instead of a stale red.
+
+### Added
+- **"Max" bitrate chip** alongside the expanded preset ladder (pins to the encoder ceiling).
 
 ---
 

@@ -16,6 +16,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+<a id="0.12.3"></a>
+## [0.12.3] - 2026-09-10
+
+Latency, energy, and touch-fix release. Reduces perceived input lag with a pre-encode frame gate + sender pacing, stops the Mac from burning GPU/CPU when no tablet is connected, and fixes the "invisible clicks" / buggy cursor feel during selection.
+
+### Fixed
+- **Tap dead-zone (250–600ms no-click window).** A press held between 250ms and the long-press threshold produced no click *and* no right-click — nothing. Buttons that "didn't respond" to a deliberate press now register reliably; the long-press timer is the sole cutoff between tap and right-click.
+- **Cursor froze during the tap-vs-scroll decision window.** The cursor now follows the finger immediately in the `.pending` state instead of freezing at the contact point for up to 600ms — positioning feels live, not sluggish.
+- **Scroll lurch at gesture transition.** The full accumulated finger travel was injected as one scroll event when crossing the tap→scroll threshold; the delta baseline now resets at the transition point.
+- **Accidental right-clicks while positioning.** Long-press threshold raised from 500→600ms and tap distance from 15→18pt, reducing surprise context menus when carefully aiming.
+- **High energy with no client connected.** When the tablet disconnects, the VideoToolbox encoder now pauses (gate short-circuits) instead of encoding 60–120fps into a void. SCStream keeps running (cheap, keeps the virtual display alive) but GPU/CPU drops to near-idle. Server starts paused; resumes with a forced keyframe on the next client connect.
+
+### Added
+- **Per-transport bitrate profiles.** USB and WiFi now have independent bitrate settings (USB default 80, WiFi default 30) with migration from the old single value and transport-specific floors (60/20 Mbps). The link, not the setting, decides how low is useful.
+- **Honest latency stats.** The Android overlay shows "RTT / Surface" — round-trip time plus the measured receive→surface-render latency from `MediaCodec.OnFrameRenderedListener`, not a fake "glass-to-glass" number. Mac settings show FPS, bitrate, and capture→send frame age.
+- **Gaming Boost rebuilds the full pipeline.** Toggling Boost now reconstructs the display + capture + encoder at the panel's effective refresh rate (no more 60Hz display pretending 120Hz), and the Android client auto-reconnects within ~2s on involuntary connection drops.
+
+### Improved
+- **Pre-encode latest-frame gate + sender pacing.** Capture only encodes frames the network can take; both SCStream and CGDisplayStream paths are unified with connection-generation tags and a 250ms stuck-encoder safety release.
+- **Single ordered touch writer + latest-MOVE coalescing.** Android touch events now serialize through one executor with a replaceable MOVE slot, eliminating interleaved writes and stale-move races.
+- **Idempotent dual-executor teardown.** StreamClient's network and touch executors shut down exactly once, fixing a race that leaked threads on reconnect.
+- **Buffered async Mac logging.** `debugLog` is now async-buffered with congestion rate-limiting, reducing main-thread contention under heavy logging.
+
+---
+
+
 <a id="0.12.2"></a>
 ## [0.12.2] - 2026-09-01
 
@@ -465,4 +491,5 @@ Each release follows this format:
 [0.2.2]: https://github.com/tranvuongquocdat/SideScreen/compare/0.2.1...0.2.2
 [0.2.1]: https://github.com/tranvuongquocdat/SideScreen/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/tranvuongquocdat/SideScreen/compare/0.1.0...0.2.0
+[0.12.3]: https://github.com/SirRiddle/SideScreen/compare/0.12.2...0.12.3
 [0.1.0]: https://github.com/tranvuongquocdat/SideScreen/releases/tag/0.1.0

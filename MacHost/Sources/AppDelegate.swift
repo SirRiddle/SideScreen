@@ -75,11 +75,12 @@ enum GestureState {
 }
 
 struct GestureThresholds {
-    static let tapMaxDistance: CGFloat = 15
+    static let tapMaxDistance: CGFloat = 18
     static let tapMaxTime: UInt64 = 250_000_000       // 250ms
     static let doubleTapMaxTime: UInt64 = 400_000_000  // 400ms
     static let doubleTapMaxDistance: CGFloat = 20
-    static let longPressTime: UInt64 = 500_000_000     // 500ms
+    static let longPressTime: UInt64 = 600_000_000     // 600ms — touch-as-trackpad users
+    // pause to position; shorter causes surprise right-clicks during selection.
     static let scrollSensitivity: CGFloat = 1.2
     static let pinchMinDistance: CGFloat = 20
     static let minTouchInterval: UInt64 = 8_000_000    // ~120Hz
@@ -700,6 +701,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             streamingServer?.setDisplaySize(width: initialEncode.width, height: initialEncode.height, rotation: settings.rotation, flipHorizontal: settings.flipHorizontal, flipVertical: settings.flipVertical)
             streamingServer?.onClientConnected = { [weak self] in
                 guard let self = self else { return }
+                self.screenCapture?.resumeCapture()
                 self.screenCapture?.requestKeyframeOrReplayCachedFrame(force: true)
                 Task { @MainActor in
                     self.settings.clientConnected = true
@@ -732,9 +734,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             streamingServer?.onClientDisconnected = { [weak self] in
                 guard let self = self else { return }
+                self.screenCapture?.pauseCapture()
                 Task { @MainActor in
                     self.cancelActiveRemoteGesture()
                     self.settings.clientConnected = false
+                    self.settings.currentFPS = 0
+                    self.settings.currentBitrate = 0
+                    self.settings.currentFrameAgeMs = 0
                     // Final lastConnected snapshot at the disconnect moment, then
                     // freeze (currentWirelessDevice = nil stops the rolling update
                     // in refreshStatusIndicators).
@@ -775,6 +781,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 frameRate: settings.effectiveRefreshRate,
                 bitrateFloorMbps: settings.connectionMode == .usb ? 60 : 20
             )
+
+            // No client yet — pause encoding immediately so the server starts
+            // in an idle state and only resumes when a tablet connects.
+            screenCapture?.pauseCapture()
 
             await MainActor.run {
                 settings.isRunning = true
@@ -1078,11 +1088,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if totalDistance > GestureThresholds.tapMaxDistance {
                 cancelLongPressTimer()
                 gestureState = .scrolling
-                let sx = deltaX * GestureThresholds.scrollSensitivity
-                let sy = deltaY * GestureThresholds.scrollSensitivity
-                injectScrollEvent(deltaX: sx, deltaY: sy, at: point)
-                lastScrollDeltaX = sx
-                lastScrollDeltaY = sy
+                // Reset the delta baseline at the scroll-entry point so the
+                // first scroll tick measures movement FROM here, not the
+                // whole accumulated distance from the down point — avoids
+                // a lurch when the pending→scroll transition fires.
+                touchLastPosition = point
+                lastScrollDeltaX = 0
+                lastScrollDeltaY = 0
+            } else {
+                // Cursor follows the finger even while we're still deciding
+                // tap vs. scroll, so positioning feels immediate instead of
+                // freezing at the down point for the whole pending window.
+                moveCursor(to: point)
             }
 
         case .longPressReady:

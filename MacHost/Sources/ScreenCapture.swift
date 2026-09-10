@@ -95,6 +95,10 @@ class ScreenCapture {
         var sendIdle = true
         var gateTimeouts = 0
         var replacements = 0
+        /// No client connected — drop captured frames instead of encoding
+        /// them into a void. Saves GPU/CPU when the tablet goes away but
+        /// the server keeps listening for the next client.
+        var clientPaused = false
     }
     private let gateLock = OSAllocatedUnfairLock(initialState: GateState())
 
@@ -113,10 +117,12 @@ class ScreenCapture {
         if let f = toEncode { encodeNow(f) }
     }
 
-    /// Single entry for every captured frame: SCStream, CGDisplayStream
-    /// fallback, keepalive and IDR replays all land here.
     private func submitLatestFrame(buffer: CVPixelBuffer, pts: CMTime, arrivalNanos: UInt64) {
         let toEncode: PendingRaw? = gateLock.withLock { state in
+            // No client → drop immediately; don't encode, don't queue, don't
+            // hold the encoder busy. The gate stays idle until a client
+            // reconnects and resumeCapture() clears the flag.
+            if state.clientPaused { return nil }
             let now = DispatchTime.now().uptimeNanoseconds
             if state.encoderBusy && now &- state.busySinceNs > 250_000_000 {
                 // VT accepted a frame but never produced output (rare). The
@@ -163,6 +169,13 @@ class ScreenCapture {
     private func encoderDidFinishFrame() {
         let toEncode: PendingRaw? = gateLock.withLock { state in
             state.encoderBusy = false
+            if state.clientPaused {
+                // A frame that was in-flight when pauseCapture() landed has
+                // finished; don't chain the next one. Clear any stale
+                // pending slot so resume starts clean.
+                state.pending = nil
+                return nil
+            }
             if state.sendIdle, let p = state.pending {
                 state.pending = nil
                 state.encoderBusy = true
@@ -172,6 +185,30 @@ class ScreenCapture {
             return nil
         }
         if let f = toEncode { encodeNow(f) }
+    }
+
+    /// Pause encoding and drop queued frames when no client is connected.
+    /// SCStream keeps running (cheap, display needs to stay alive for the
+    /// next client) but the encoder and encode-queue go idle.
+    func pauseCapture() {
+        gateLock.withLock { state in
+            state.clientPaused = true
+            state.pending = nil
+        }
+        debugLog("Capture paused — no client connected, encoder idle")
+    }
+
+    /// Resume encoding for a newly connected client. The next captured
+    /// frame enters the gate normally; a forced keyframe is requested
+    /// so the new client's decoder can sync immediately.
+    func resumeCapture() {
+        gateLock.withLock { state in
+            state.clientPaused = false
+            state.encoderBusy = false
+            state.pending = nil
+        }
+        requestKeyframeOrReplayCachedFrame(force: true)
+        debugLog("Capture resumed — client connected, requesting keyframe")
     }
     private var lastPixelBuffer: CVPixelBuffer?
 

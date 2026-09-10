@@ -702,7 +702,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             streamingServer?.onClientConnected = { [weak self] in
                 guard let self = self else { return }
                 self.screenCapture?.resumeCapture()
-                self.screenCapture?.requestKeyframeOrReplayCachedFrame(force: true)
                 Task { @MainActor in
                     self.settings.clientConnected = true
                 }
@@ -1136,13 +1135,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func oneFingerUp(at point: CGPoint) {
         cancelLongPressTimer()
         let now = DispatchTime.now().uptimeNanoseconds
-        let elapsed = now - touchStartTime
         let distance = hypot(point.x - touchStartPosition.x, point.y - touchStartPosition.y)
 
         switch gestureState {
         case .pending:
-            // Quick release, no movement → tap or double tap
-            if distance < GestureThresholds.tapMaxDistance && elapsed < GestureThresholds.tapMaxTime {
+            // Lift before the long-press timer fired → tap (or double tap).
+            // The timer (longPressTime, 600ms) is the sole cutoff: if it
+            // already fired the state is .longPressReady, not .pending.
+            // Removing the old `elapsed < tapMaxTime (250ms)` gate fixes
+            // the 250–600ms dead zone where a deliberate press produced
+            // NO click at all — buttons that "didn't respond."
+            if distance < GestureThresholds.tapMaxDistance {
                 // Check double tap
                 let timeSinceLastTap = now - lastTapTime
                 let distFromLastTap = hypot(point.x - lastTapPosition.x, point.y - lastTapPosition.y)

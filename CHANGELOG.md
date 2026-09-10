@@ -9,15 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- **Tablet goes black when an app is fullscreen on the Mac (#50).** Caused by macOS's "Displays have separate Spaces" being turned off — with it off, macOS blanks every other display, including the virtual one, whenever any app enters fullscreen. The Mac app now detects this and shows a warning in the Status panel with a shortcut to the setting; the README's Troubleshooting section documents it too.
-
 ### Planned
 - mDNS auto-discovery for wireless mode
 - Multi-touch gestures
 - Stylus/pen support
 
 ---
+
+<a id="0.12.4"></a>
+## [0.12.4] - 2026-09-10
+
+Upstream sync release. Integrates all features and fixes from the original repo's 0.11.3 release that were missing from our fork, plus PR #68 which hasn't been merged upstream yet.
+
+### Fixed
+- **Washed-out / over-bright picture (#55).** The Mac captured full-range (0–255) video and flagged the stream accordingly, but several Android display paths (Xiaomi/HyperOS among them) apply a limited-range matrix regardless, so light greys clipped to white and shadows crushed to black. The capture is now video-range and the bitstream is tagged BT.709 explicitly — the default every decoder and GPU assumes, so it renders identically everywhere. *(upstream 0.11.3)*
+- **Black screen on tablets whose decoder overstates its limit (#66, #41 follow-up).** The tablet advertised the decoder's nominal size limit (often 8192×8192), ignoring the blocks-per-second budget that actually binds. The tablet now advertises the largest frame its decoder sustains at 60 fps, no larger than its panel; the Mac scales the stream to fit and shrinks the budget further when streaming above 60 fps. *(upstream 0.11.3)*
+- **Late decoder limit / geometry opt-in now honoured.** On a slow link or device the tablet's capability advertisement could land after the Mac had finished protocol startup, in which case it was recorded but ignored until the next restart. The Mac now re-negotiates and re-sends the display config immediately. *(upstream 0.11.3)*
+- **Tablet goes black when an app is fullscreen on the Mac (#50).** Caused by macOS's "Displays have separate Spaces" being turned off — with it off, macOS blanks every other display, including the virtual one. The Mac app now detects this and shows a warning in the Status panel. *(upstream 0.11.3)*
+- **Configuration changes no longer drop the connection (#68).** Connecting or disconnecting a Bluetooth keyboard, or an automatic dark-theme switch, destroyed and recreated MainActivity mid-stream — `onDestroy` ran `cleanup()` which closed the socket. The `configChanges` manifest attribute now declares `keyboard|keyboardHidden|navigation|uiMode` so Android doesn't recreate the activity. *(upstream PR #68, not yet merged)*
+
+---
+
 
 <a id="0.12.3"></a>
 ## [0.12.3] - 2026-09-10
@@ -495,4 +507,5 @@ Each release follows this format:
 [0.2.1]: https://github.com/tranvuongquocdat/SideScreen/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/tranvuongquocdat/SideScreen/compare/0.1.0...0.2.0
 [0.12.3]: https://github.com/SirRiddle/SideScreen/compare/0.12.2...0.12.3
+[0.12.4]: https://github.com/SirRiddle/SideScreen/compare/0.12.3...0.12.4
 [0.1.0]: https://github.com/tranvuongquocdat/SideScreen/releases/tag/0.1.0

@@ -16,6 +16,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+<a id="0.12.7"></a>
+## [0.12.7] - 2026-09-15
+
+Gesture model reverted to upstream: 1-finger move = scroll. The 0.12.5 experiment that turned 1-finger moves into drags broke scrolling and is reverted.
+
+### Fixed
+- **1-finger swipe scrolls the page.** Slow deliberate drags still work via long-press (hold still for 600ms, then drag).
+- **Tap dead-zone fix and cursor-follow stay.** The 250–600ms no-click window from 0.12.3 remains fixed; the cursor follows your finger immediately from contact instead of freezing.
+
+### Selection guide
+- **Select text / drag a window / hit a button:** hold still on the spot for 600ms (a long press), then drag. Release.
+- **Scroll a page:** swipe freely (one finger).
+- **Right-click:** press and hold without moving for 600ms, then release.
+
+---
+
+## [0.12.6] - 2026-09-15
+
+Gesture continuation — restores 1-finger scroll that 0.12.5 removed, while keeping drag-select.
+
+### Fixed
+- **1-finger scroll restored.** A fast swipe (> 800 px/s average velocity from contact) transitions into scroll state. Slow deliberate moves stay drags.
+- **Momentum restored.** A lift from a fast flick starts momentum scrolling; a lift from a slow drag ends the drag.
+
+---
+
 <a id="0.12.5"></a>
 ## [0.12.5] - 2026-09-15
 
@@ -517,6 +543,8 @@ Each release follows this format:
 [0.2.2]: https://github.com/tranvuongquocdat/SideScreen/compare/0.2.1...0.2.2
 [0.2.1]: https://github.com/tranvuongquocdat/SideScreen/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/tranvuongquocdat/SideScreen/compare/0.1.0...0.2.0
+[0.12.7]: https://github.com/SirRiddle/SideScreen/compare/0.12.6...0.12.7
+[0.12.6]: https://github.com/SirRiddle/SideScreen/compare/0.12.5...0.12.6
 [0.12.5]: https://github.com/SirRiddle/SideScreen/compare/0.12.4...0.12.5
 [0.12.4]: https://github.com/SirRiddle/SideScreen/compare/0.12.3...0.12.4
 [0.12.3]: https://github.com/SirRiddle/SideScreen/compare/0.12.2...0.12.3

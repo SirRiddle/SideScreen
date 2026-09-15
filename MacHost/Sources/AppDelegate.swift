@@ -1097,42 +1097,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case .pending:
             if totalDistance > GestureThresholds.tapMaxDistance {
                 cancelLongPressTimer()
-                gestureState = .scrolling
-                // Reset the delta baseline at the scroll-entry point so the
-                // first scroll tick measures movement FROM here, not the
-                // whole accumulated distance from the down point — avoids
-                // a lurch when the pending→scroll transition fires.
-                touchLastPosition = point
-                lastScrollDeltaX = 0
-                lastScrollDeltaY = 0
+                // 1-finger move past threshold = drag (mousedown), never
+                // scroll. Scrolling is the 2-finger gesture exclusively —
+                // macOS users expect one finger = click/drag, two fingers
+                // = scroll. The old 1-finger scroll was what made text
+                // selection on the tablet feel like it scrolled away
+                // instead of selecting.
+                gestureState = .dragging
+                injectMouseDown(at: touchStartPosition)
+                injectMouseDragged(to: point)
             } else {
                 // Cursor follows the finger even while we're still deciding
-                // tap vs. scroll, so positioning feels immediate instead of
+                // tap vs. drag, so positioning feels immediate instead of
                 // freezing at the down point for the whole pending window.
                 moveCursor(to: point)
             }
 
         case .longPressReady:
             if totalDistance > GestureThresholds.tapMaxDistance {
-                // Long press + drag → left mouse drag
+                // Long press + drag is still a synthetic left-mouse drag;
+                // .longPressReady can only be reached by holding without
+                // matching the threshold, so the drag starts here.
                 gestureState = .dragging
                 injectMouseDown(at: touchStartPosition)
                 injectMouseDragged(to: point)
             }
 
-        case .scrolling:
-            let sx = deltaX * GestureThresholds.scrollSensitivity
-            let sy = deltaY * GestureThresholds.scrollSensitivity
-            injectScrollEvent(deltaX: sx, deltaY: sy, at: point)
-            let timeDelta = now - touchLastMoveTime
-            if timeDelta > 0 && timeDelta < 100_000_000 {
-                lastScrollDeltaX = sx
-                lastScrollDeltaY = sy
-            }
-
         case .dragging, .penDrawing:
-            // .penDrawing only lands here if pen mode was switched off mid-stroke; keep
-            // feeding drags so the button that is still down doesn't sit in one spot.
             injectMouseDragged(to: point)
 
         default:
@@ -1175,20 +1166,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case .longPressReady:
             // Held long but didn't drag → right click
             performRightClick(at: point)
-
-        case .scrolling:
-            // Check momentum
-            let timeSinceLastMove = now - touchLastMoveTime
-            if timeSinceLastMove < 50_000_000 {
-                let threshold: CGFloat = 2.0
-                if abs(lastScrollDeltaX) > threshold || abs(lastScrollDeltaY) > threshold {
-                    startMomentumScroll(
-                        velocityX: lastScrollDeltaX * 6.0,
-                        velocityY: lastScrollDeltaY * 6.0,
-                        at: point
-                    )
-                }
-            }
 
         case .dragging, .penDrawing:
             // .penDrawing only lands here if the mode was switched off mid-stroke.

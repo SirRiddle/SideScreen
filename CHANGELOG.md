@@ -16,6 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+<a id="0.12.5"></a>
+## [0.12.5] - 2026-09-15
+
+Gesture-model fix. One finger is now trackpad-style: tap = click, move = drag / select, hold = right click. Scrolling is exclusively two-finger.
+
+### Fixed
+- **"Ghost clicks" / wrong-selection.** One-finger move past the tap threshold now starts a drag (mousedown + cursor follows) instead of entering a scroll state. Text selection, window resize, and UI interaction now respond naturally — hold, then drag, exactly as on a Mac trackpad. Previously the model was inverted: move = scroll, drag = long-press + move, which made precise selection feel buggy.
+- **Removed frozen-cursor window.** Cursor now follows the finger live from contact; it no longer freezes at the first touch point while the gesture classifier decides.
+
+---
+
 <a id="0.12.4"></a>
 ## [0.12.4] - 2026-09-10
 
@@ -506,6 +517,7 @@ Each release follows this format:
 [0.2.2]: https://github.com/tranvuongquocdat/SideScreen/compare/0.2.1...0.2.2
 [0.2.1]: https://github.com/tranvuongquocdat/SideScreen/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/tranvuongquocdat/SideScreen/compare/0.1.0...0.2.0
-[0.12.3]: https://github.com/SirRiddle/SideScreen/compare/0.12.2...0.12.3
+[0.12.5]: https://github.com/SirRiddle/SideScreen/compare/0.12.4...0.12.5
 [0.12.4]: https://github.com/SirRiddle/SideScreen/compare/0.12.3...0.12.4
+[0.12.3]: https://github.com/SirRiddle/SideScreen/compare/0.12.2...0.12.3
 [0.1.0]: https://github.com/tranvuongquocdat/SideScreen/releases/tag/0.1.0

@@ -84,6 +84,12 @@ struct GestureThresholds {
     static let scrollSensitivity: CGFloat = 1.2
     static let pinchMinDistance: CGFloat = 20
     static let minTouchInterval: UInt64 = 8_000_000    // ~120Hz
+    /// Velocity (px/s) above which a 1-finger move-in-progress transitions
+    /// .pending → .scrolling. Below it, the move becomes a .dragging mousedown
+    /// — deliberate drags (selection, window move) and fast flicks (page
+    /// scroll) both work, no mode toggle needed. 800 px/s is roughly "ah, a
+    /// fling"; under that, "I want to do something here".
+    static let scrollFlickVelocity: CGFloat = 800.0
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -1096,20 +1102,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         switch gestureState {
         case .pending:
             if totalDistance > GestureThresholds.tapMaxDistance {
-                cancelLongPressTimer()
-                // 1-finger move past threshold = drag (mousedown), never
-                // scroll. Scrolling is the 2-finger gesture exclusively —
-                // macOS users expect one finger = click/drag, two fingers
-                // = scroll. The old 1-finger scroll was what made text
-                // selection on the tablet feel like it scrolled away
-                // instead of selecting.
-                gestureState = .dragging
-                injectMouseDown(at: touchStartPosition)
-                injectMouseDragged(to: point)
+                // Velocity decides: fast flick = scroll, slow move = drag/select.
+                // This lets both work on one finger with no mode toggle — slow
+                // deliberate drags (text selection, window move) become .dragging,
+                // fast flicks (page up/down) become .scrolling.
+                let elapsed = now - touchStartTime
+                let avgVelocity = elapsed > 0
+                    ? totalDistance / (CGFloat(elapsed) / 1_000_000_000)
+                    : 0
+                if avgVelocity > GestureThresholds.scrollFlickVelocity {
+                    cancelLongPressTimer()
+                    gestureState = .scrolling
+                    // Reset delta baseline at the scroll-entry point so the
+                    // first scroll tick measures movement FROM here, not the
+                    // accumulated distance from the down point — avoids a lurch.
+                    touchLastPosition = point
+                    lastScrollDeltaX = 0
+                    lastScrollDeltaY = 0
+                } else {
+                    cancelLongPressTimer()
+                    gestureState = .dragging
+                    injectMouseDown(at: touchStartPosition)
+                    injectMouseDragged(to: point)
+                }
             } else {
                 // Cursor follows the finger even while we're still deciding
-                // tap vs. drag, so positioning feels immediate instead of
-                // freezing at the down point for the whole pending window.
+                // tap vs. drag vs. scroll, so positioning feels immediate
+                // instead of freezing at the down point for the whole window.
                 moveCursor(to: point)
             }
 
@@ -1123,6 +1142,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 injectMouseDragged(to: point)
             }
 
+        case .scrolling:
+            let sx = deltaX * GestureThresholds.scrollSensitivity
+            let sy = deltaY * GestureThresholds.scrollSensitivity
+            injectScrollEvent(deltaX: sx, deltaY: sy, at: point)
+            let timeDelta = now - touchLastMoveTime
+            if timeDelta > 0 && timeDelta < 100_000_000 {
+                lastScrollDeltaX = sx
+                lastScrollDeltaY = sy
+            }
         case .dragging, .penDrawing:
             injectMouseDragged(to: point)
 
@@ -1166,6 +1194,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case .longPressReady:
             // Held long but didn't drag → right click
             performRightClick(at: point)
+
+        case .scrolling:
+            // A lift from a fast-flick scroll starts momentum; the user wants
+            // the page to keep coasting after the finger leaves.
+            let timeSinceLastMove = now - touchLastMoveTime
+            if timeSinceLastMove < 50_000_000 {
+                let threshold: CGFloat = 2.0
+                if abs(lastScrollDeltaX) > threshold || abs(lastScrollDeltaY) > threshold {
+                    startMomentumScroll(
+                        velocityX: lastScrollDeltaX * 6.0,
+                        velocityY: lastScrollDeltaY * 6.0,
+                        at: point
+                    )
+                }
+            }
 
         case .dragging, .penDrawing:
             // .penDrawing only lands here if the mode was switched off mid-stroke.

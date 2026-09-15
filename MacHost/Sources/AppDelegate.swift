@@ -84,12 +84,6 @@ struct GestureThresholds {
     static let scrollSensitivity: CGFloat = 1.2
     static let pinchMinDistance: CGFloat = 20
     static let minTouchInterval: UInt64 = 8_000_000    // ~120Hz
-    /// Velocity (px/s) above which a 1-finger move-in-progress transitions
-    /// .pending → .scrolling. Below it, the move becomes a .dragging mousedown
-    /// — deliberate drags (selection, window move) and fast flicks (page
-    /// scroll) both work, no mode toggle needed. 800 px/s is roughly "ah, a
-    /// fling"; under that, "I want to do something here".
-    static let scrollFlickVelocity: CGFloat = 800.0
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -1102,33 +1096,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         switch gestureState {
         case .pending:
             if totalDistance > GestureThresholds.tapMaxDistance {
-                // Velocity decides: fast flick = scroll, slow move = drag/select.
-                // This lets both work on one finger with no mode toggle — slow
-                // deliberate drags (text selection, window move) become .dragging,
-                // fast flicks (page up/down) become .scrolling.
-                let elapsed = now - touchStartTime
-                let avgVelocity = elapsed > 0
-                    ? totalDistance / (CGFloat(elapsed) / 1_000_000_000)
-                    : 0
-                if avgVelocity > GestureThresholds.scrollFlickVelocity {
-                    cancelLongPressTimer()
-                    gestureState = .scrolling
-                    // Reset delta baseline at the scroll-entry point so the
-                    // first scroll tick measures movement FROM here, not the
-                    // accumulated distance from the down point — avoids a lurch.
-                    touchLastPosition = point
-                    lastScrollDeltaX = 0
-                    lastScrollDeltaY = 0
-                } else {
-                    cancelLongPressTimer()
-                    gestureState = .dragging
-                    injectMouseDown(at: touchStartPosition)
-                    injectMouseDragged(to: point)
-                }
+                cancelLongPressTimer()
+                // 1-finger move = scroll (upstream behavior). Slow deliberate
+                // drags still work via long-press-then-drag from .longPressReady.
+                // Cursor follows in .pending up to this point (unlike upstream).
+                gestureState = .scrolling
+                let sx = deltaX * GestureThresholds.scrollSensitivity
+                let sy = deltaY * GestureThresholds.scrollSensitivity
+                injectScrollEvent(deltaX: sx, deltaY: sy, at: point)
+                lastScrollDeltaX = sx
+                lastScrollDeltaY = sy
             } else {
-                // Cursor follows the finger even while we're still deciding
-                // tap vs. drag vs. scroll, so positioning feels immediate
-                // instead of freezing at the down point for the whole window.
+                // Cursor follows the finger so positioning feels immediate
+                // instead of freezing at the down point while we wait to
+                // decide if this is a tap or a drag/scroll.
                 moveCursor(to: point)
             }
 

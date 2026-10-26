@@ -9,9 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Synced with upstream 1.1.1 fixes (phase 1: bug fixes that don't change the wire protocol).
+Synced with upstream 1.1.1 (everything except Play Store, demo mode and website changes), plus fork fixes for bugs still open upstream.
 
 ### Added
+- **Per-tablet settings** (upstream #92). The Mac remembers each tablet's settings — resolution, refresh rate, HiDPI, rotation and flip, USB and WiFi bitrate, quality, Gaming Boost, touch, Pen / Draw mode — and where its display sits in the arrangement, and brings them back when that tablet connects again. The virtual display is rebuilt for the incoming tablet while it connects; a tablet seen for the first time starts from the current settings. The 20 most recently used tablets are kept. Needs the updated Android app: it sends a random per-install ID (new client→server wire type 18, not a hardware serial) before the handshake finishes, and now reports the device name you see in Android settings instead of the model code. Older apps behave as before; older wireless apps are told apart by device name.
 - Android: app logo on the idle connect screen (upstream #106).
 
 ### Changed

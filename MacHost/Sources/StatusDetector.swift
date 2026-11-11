@@ -28,28 +28,35 @@ enum StatusDetector {
         return flags.contains(.reachable) && !flags.contains(.connectionRequired)
     }
 
-    /// Run `adb devices`, return list of device serials in `device` state.
-    static func usbDevices() -> [String] {
-        guard let adbPath = adbExecutablePath() else { return [] }
+    /// Physical USB devices from `adb devices -l` (USBADBDevice), including
+    /// unauthorized / offline ones, or adb's own error message.
+    static func adbDeviceList() -> (devices: [USBADBDevice], error: String?) {
+        guard let adbPath = adbExecutablePath() else { return ([], nil) }
         let task = Process()
         task.executableURL = URL(fileURLWithPath: adbPath)
-        task.arguments = ["devices"]
+        task.arguments = ["devices", "-l"]
         let pipe = Pipe()
+        let errorPipe = Pipe()
         task.standardOutput = pipe
-        task.standardError = Pipe()
+        task.standardError = errorPipe
         do {
             try task.run()
             task.waitUntilExit()
         } catch {
-            return []
+            return ([], error.localizedDescription)
         }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
-        return output.split(separator: "\n").compactMap { line in
-            let parts = line.split(separator: "\t").map(String.init)
-            guard parts.count == 2, parts[1] == "device" else { return nil }
-            return parts[0]
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        guard task.terminationStatus == 0 else {
+            let stderr = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let last = (stderr + "\n" + output).split(whereSeparator: \.isNewline).last.map(String.init) ?? ""
+            return ([], last.isEmpty ? "adb exited with code \(task.terminationStatus)." : String(last.prefix(200)))
         }
+        return (USBADBDevice.parse(output), nil)
+    }
+
+    /// Serials of physical USB devices ready for `adb reverse`.
+    static func usbDevices() -> [String] {
+        adbDeviceList().devices.filter(\.isReady).map(\.serial)
     }
 
     /// Heuristic: parse `adb reverse --list` for `tcp:<port> tcp:<port>`.

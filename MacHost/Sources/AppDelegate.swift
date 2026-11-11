@@ -209,16 +209,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let port = Int(settings.port)
         Task.detached { [weak self] in
-            let devices = StatusDetector.usbDevices()
+            let listing = StatusDetector.adbDeviceList()
+            let devices = listing.devices.filter(\.isReady).map(\.serial)
             // Every attached device needs its own reverse (see setupADBReverse).
             let reverseOK = !devices.isEmpty
                 && devices.allSatisfy { StatusDetector.adbReverseConfigured(port: port, serial: $0) }
+            // What to do about attached-but-unusable devices, or adb's own error (from PR #80).
+            let hint = listing.error.map { "adb: \($0)" }
+                ?? listing.devices.compactMap(\.connectionHint).first
             await MainActor.run { [weak self] in
                 guard let self = self else { return }
-                
+
                 let isConnected = !devices.isEmpty
 
                 self.settings.usbDeviceConnected = isConnected
+                self.settings.usbDeviceHint = hint
                 self.settings.adbReverseConfigured = reverseOK
 
                 // Self-healing USB bridge (level-triggered, not edge-triggered):

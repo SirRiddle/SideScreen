@@ -827,7 +827,14 @@ struct SettingsView: View {
                                     StatusRow(title: "USB device",
                                               status: settings.usbDeviceConnected ? "Detected" : "Not detected",
                                               color: settings.usbDeviceConnected ? .green : .red,
-                                              hint: "An Android device authorized for ADB and visible to your Mac. Plug in via USB-C and tap Allow on the device's USB debugging prompt.")
+                                              hint: "An Android device authorized for ADB and visible to your Mac. Plug in via USB-C and tap Allow on the device's USB debugging prompt. Emulators and wireless-debugging connections are ignored.")
+                                    if let usbHint = settings.usbDeviceHint {
+                                        Text(usbHint)
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.orange)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .textSelection(.enabled)
+                                    }
                                 } else {
                                     StatusRow(title: "WiFi",
                                               status: settings.wifiConnected ? "Connected" : "Disconnected",
@@ -1350,6 +1357,8 @@ class DisplaySettings: ObservableObject {
     @Published var adbInstalled = false
     @Published var adbReverseConfigured = false
     @Published var usbDeviceConnected = false
+    /// Unauthorized / offline device guidance or an adb error, nil when fine.
+    @Published var usbDeviceHint: String?
     @Published var wifiConnected = false
     @Published var listeningAddress: String?
     @Published var isRunning = false

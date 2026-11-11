@@ -801,7 +801,16 @@ struct SettingsView: View {
                                     StatusRow(title: "ADB installed",
                                               status: settings.adbInstalled ? "Installed" : "Missing",
                                               color: settings.adbInstalled ? .green : .red,
-                                              hint: "USB mode tunnels the TCP stream through the cable using `adb reverse`. Requires the `adb` command on the Mac. Searched paths: Homebrew, /usr/local/bin, ~/Library/Android/sdk/platform-tools, and PATH (`which adb`).")
+                                              hint: "USB mode tunnels the TCP stream through the cable using `adb reverse`. Requires the `adb` command on the Mac. Searched: the ADB path below, $ANDROID_HOME, Homebrew, /usr/local/bin, ~/Library/Android/sdk/platform-tools, nix (/run/current-system/sw/bin, per-user and ~/.nix-profile), MacPorts, and your login shell's PATH.")
+                                    HStack(spacing: 6) {
+                                        Text("ADB path")
+                                            .font(.system(size: 11))
+                                            .foregroundColor(.secondary)
+                                        TextField("Auto-detect", text: $settings.adbPath)
+                                            .textFieldStyle(.roundedBorder)
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .help("Optional. Full path to adb, or to the folder containing it (e.g. an SDK's platform-tools). Leave empty to auto-detect.")
+                                    }
                                     if !settings.adbInstalled {
                                         Text("brew install android-platform-tools")
                                             .font(.system(size: 10, design: .monospaced))
@@ -1295,6 +1304,11 @@ class DisplaySettings: ObservableObject {
     @Published var customHeight: Int {
         didSet { save("customHeight", customHeight) }
     }
+    /// Optional adb location for setups auto-detection misses (#91, #100).
+    /// Read by StatusDetector via ADBLocator.customPathKey.
+    @Published var adbPath: String {
+        didSet { save("adbPath", adbPath) }
+    }
     @Published var touchEnabled: Bool {
         didSet { save("touchEnabled", touchEnabled) }
     }
@@ -1363,6 +1377,7 @@ class DisplaySettings: ObservableObject {
         self.showAllResolutions = defaults.bool(forKey: keyPrefix + "showAllResolutions")
         self.customWidth = defaults.object(forKey: keyPrefix + "customWidth") as? Int ?? 1920
         self.customHeight = defaults.object(forKey: keyPrefix + "customHeight") as? Int ?? 1200
+        self.adbPath = defaults.string(forKey: keyPrefix + "adbPath") ?? ""
         self.touchEnabled = defaults.object(forKey: keyPrefix + "touchEnabled") as? Bool ?? true
         // Default off: without it the touch pipeline keeps its original trackpad behaviour.
         self.penModeEnabled = defaults.object(forKey: keyPrefix + "penModeEnabled") as? Bool ?? false

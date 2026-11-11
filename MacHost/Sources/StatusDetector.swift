@@ -59,47 +59,93 @@ enum StatusDetector {
         return output.contains("tcp:\(port) tcp:\(port)")
     }
 
+    private static let adbLock = NSLock()
     private static var cachedAdbPath: String?
     private static var lastAdbCacheCheck: Date = .distantPast
+    /// Result of the login-shell PATH lookup, refreshed off the main thread.
+    private static var shellAdbPath: String?
+    private static var lastShellLookup: Date = .distantPast
+    private static var shellLookupRunning = false
 
+    /// Path of the adb executable, or nil. Cheap and safe on the main thread:
+    /// the fixed candidates (ADBLocator) are re-checked every 5 s; the
+    /// login-shell PATH lookup runs in the background at most once a minute.
     static func adbExecutablePath() -> String? {
-        // Re-resolve every 5 s so install/uninstall is reflected.
+        adbLock.lock()
         if let cached = cachedAdbPath, Date().timeIntervalSince(lastAdbCacheCheck) < 5.0 {
+            adbLock.unlock()
             return cached
         }
-        let candidatePaths = [
-            "/opt/homebrew/bin/adb",
-            "/usr/local/bin/adb",
-            "\(NSHomeDirectory())/Library/Android/sdk/platform-tools/adb"
-        ]
-        for path in candidatePaths where FileManager.default.isExecutableFile(atPath: path) {
-            cachedAdbPath = path
-            lastAdbCacheCheck = Date()
-            return path
+        adbLock.unlock()
+
+        let env = ProcessInfo.processInfo.environment
+        let candidates = ADBLocator.candidates(
+            customPath: UserDefaults.standard.string(forKey: ADBLocator.customPathKey),
+            environment: env,
+            home: NSHomeDirectory(),
+            user: NSUserName()
+        )
+        let found = candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+            ?? shellLookupResult(environment: env)
+
+        adbLock.lock()
+        cachedAdbPath = found
+        lastAdbCacheCheck = Date()
+        adbLock.unlock()
+        return found
+    }
+
+    /// adb as the user's login shell finds it (nix-darwin, asdf, custom PATH).
+    /// Returns the last known result at once and refreshes it in the
+    /// background when older than a minute, so status polling never blocks.
+    private static func shellLookupResult(environment: [String: String]) -> String? {
+        adbLock.lock()
+        let result = shellAdbPath.flatMap { FileManager.default.isExecutableFile(atPath: $0) ? $0 : nil }
+        let stale = Date().timeIntervalSince(lastShellLookup) > 60
+        let start = stale && !shellLookupRunning
+        if start { shellLookupRunning = true }
+        adbLock.unlock()
+
+        if start {
+            DispatchQueue.global(qos: .utility).async {
+                let path = runShellLookup(shell: ADBLocator.loginShell(environment: environment))
+                adbLock.lock()
+                shellAdbPath = path
+                lastShellLookup = Date()
+                shellLookupRunning = false
+                if path != nil { lastAdbCacheCheck = .distantPast } // pick it up on the next call
+                adbLock.unlock()
+                if let path { debugLog("Found adb via login shell PATH: \(path)") }
+            }
         }
-        // Fallback: ask `which adb` (covers PATH-installed setups).
+        return result
+    }
+
+    /// `<shell> -l -c 'command -v adb'`, killed after 3 s (a slow or
+    /// interactive startup file must not hang the lookup).
+    private static func runShellLookup(shell: String) -> String? {
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        task.arguments = ["adb"]
+        task.executableURL = URL(fileURLWithPath: shell)
+        task.arguments = ["-l", "-c", "command -v adb"]
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = Pipe()
+        task.standardInput = FileHandle.nullDevice
+        let done = DispatchSemaphore(value: 0)
+        task.terminationHandler = { _ in done.signal() }
         do {
             try task.run()
-            task.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let out = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !out.isEmpty,
-               FileManager.default.isExecutableFile(atPath: out) {
-                cachedAdbPath = out
-                lastAdbCacheCheck = Date()
-                return out
-            }
         } catch {
-            // ignore
+            return nil
         }
-        cachedAdbPath = nil
-        lastAdbCacheCheck = Date()
-        return nil
+        if done.wait(timeout: .now() + 3) == .timedOut {
+            task.terminate()
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8),
+              let path = ADBLocator.parseShellLookup(output),
+              FileManager.default.isExecutableFile(atPath: path) else { return nil }
+        return path
     }
 }

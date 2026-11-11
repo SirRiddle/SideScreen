@@ -19,12 +19,14 @@ final class OneFingerGestureRulesTests: XCTestCase {
     ) -> OneFingerGestureRules.UpDecision {
         OneFingerGestureRules.onUp(
             state: state,
-            distanceFromStart: moved,
-            sinceLastTapNs: sinceLastTapMs.map { $0 * ms },
-            distanceFromLastTap: fromLastTap,
-            sinceLastMoveNs: sinceLastMoveMs * ms,
-            lastScrollDeltaX: lastDelta.0,
-            lastScrollDeltaY: lastDelta.1
+            lift: OneFingerGestureRules.Lift(
+                distanceFromStart: moved,
+                sinceLastTapNs: sinceLastTapMs.map { $0 * ms },
+                distanceFromLastTap: fromLastTap,
+                sinceLastMoveNs: sinceLastMoveMs * ms,
+                lastScrollDeltaX: lastDelta.0,
+                lastScrollDeltaY: lastDelta.1
+            )
         )
     }
 

@@ -1282,12 +1282,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Decisions in OneFingerGestureRules (unit-tested).
         let decision = OneFingerGestureRules.onUp(
             state: gestureState,
-            distanceFromStart: distance,
-            sinceLastTapNs: lastTapTime == 0 ? nil : now - lastTapTime,
-            distanceFromLastTap: hypot(point.x - lastTapPosition.x, point.y - lastTapPosition.y),
-            sinceLastMoveNs: now - touchLastMoveTime,
-            lastScrollDeltaX: lastScrollDeltaX,
-            lastScrollDeltaY: lastScrollDeltaY
+            lift: OneFingerGestureRules.Lift(
+                distanceFromStart: distance,
+                sinceLastTapNs: lastTapTime == 0 ? nil : now - lastTapTime,
+                distanceFromLastTap: hypot(point.x - lastTapPosition.x, point.y - lastTapPosition.y),
+                sinceLastMoveNs: now - touchLastMoveTime,
+                lastScrollDeltaX: lastScrollDeltaX,
+                lastScrollDeltaY: lastScrollDeltaY
+            )
         )
         switch decision {
         case .click:

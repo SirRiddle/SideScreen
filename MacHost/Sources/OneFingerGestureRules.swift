@@ -55,37 +55,38 @@ enum OneFingerGestureRules {
     static let momentumMinDelta: CGFloat = 2.0
     static let momentumGain: CGFloat = 6.0
 
-    /// - Parameters:
-    ///   - sinceLastTapNs: time since the previous single tap ended, or nil when
-    ///     there is none to pair with (none yet, or it already formed a double).
-    static func onUp(
-        state: GestureState,
-        distanceFromStart: CGFloat,
-        sinceLastTapNs: UInt64?,
-        distanceFromLastTap: CGFloat,
-        sinceLastMoveNs: UInt64,
-        lastScrollDeltaX: CGFloat,
-        lastScrollDeltaY: CGFloat
-    ) -> UpDecision {
+    /// What is known at the moment the finger lifts.
+    struct Lift {
+        var distanceFromStart: CGFloat
+        /// Time since the previous single tap ended, or nil when there is none
+        /// to pair with (none yet, or it already formed a double click).
+        var sinceLastTapNs: UInt64?
+        var distanceFromLastTap: CGFloat
+        var sinceLastMoveNs: UInt64
+        var lastScrollDeltaX: CGFloat
+        var lastScrollDeltaY: CGFloat
+    }
+
+    static func onUp(state: GestureState, lift: Lift) -> UpDecision {
         switch state {
         case .pending:
             // The long-press timer is the only time cutoff: a lift before it
             // fired is a tap however long it took.
-            guard distanceFromStart < GestureThresholds.tapMaxDistance else { return .nothing }
-            if let since = sinceLastTapNs,
+            guard lift.distanceFromStart < GestureThresholds.tapMaxDistance else { return .nothing }
+            if let since = lift.sinceLastTapNs,
                since < GestureThresholds.doubleTapMaxTime,
-               distanceFromLastTap < GestureThresholds.doubleTapMaxDistance {
+               lift.distanceFromLastTap < GestureThresholds.doubleTapMaxDistance {
                 return .doubleClick
             }
             return .click
         case .longPressReady:
             return .rightClick
         case .scrolling:
-            guard sinceLastMoveNs < momentumMaxLiftDelayNs,
-                  abs(lastScrollDeltaX) > momentumMinDelta || abs(lastScrollDeltaY) > momentumMinDelta else {
+            guard lift.sinceLastMoveNs < momentumMaxLiftDelayNs,
+                  abs(lift.lastScrollDeltaX) > momentumMinDelta || abs(lift.lastScrollDeltaY) > momentumMinDelta else {
                 return .nothing
             }
-            return .momentum(velocityX: lastScrollDeltaX * momentumGain, velocityY: lastScrollDeltaY * momentumGain)
+            return .momentum(velocityX: lift.lastScrollDeltaX * momentumGain, velocityY: lift.lastScrollDeltaY * momentumGain)
         case .dragging, .penDrawing:
             return .releaseDrag
         default:

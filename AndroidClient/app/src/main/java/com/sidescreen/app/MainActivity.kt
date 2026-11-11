@@ -1013,8 +1013,14 @@ class MainActivity : AppCompatActivity() {
             }
 
         if (videoDecoder != null && decoderUsingTextureView == useTextureView) {
-            videoDecoder?.updateResolution(displayWidth, displayHeight)
-            return
+            try {
+                videoDecoder?.updateResolution(displayWidth, displayHeight)
+                return
+            } catch (e: Exception) {
+                // Restarting the codec in place failed (upstream 1.0.1 crash): build a fresh
+                // decoder below instead, which reports failure in the UI rather than crashing.
+                mainDiag("Decoder resize FAILED: ${e.message} — recreating")
+            }
         }
 
         videoDecoder?.release()
@@ -1097,6 +1103,16 @@ class MainActivity : AppCompatActivity() {
             log("❌ Failed to initialize decoder: ${e.message}")
             runOnUiThread {
                 updateStatus("Video decoder failed: ${e.message}")
+                // The status text sits in the settings panel, hidden while streaming —
+                // without this the user would just see a black screen.
+                if (isConnected) {
+                    android.widget.Toast
+                        .makeText(
+                            this,
+                            "Video decoder failed — disconnect and reconnect to retry.",
+                            android.widget.Toast.LENGTH_LONG,
+                        ).show()
+                }
             }
         }
     }

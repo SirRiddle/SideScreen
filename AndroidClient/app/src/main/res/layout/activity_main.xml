@@ -185,13 +185,15 @@
             android:orientation="vertical"
             android:padding="40dp">
 
-            <!-- Icon -->
-            <View
-                android:layout_width="80dp"
-                android:layout_height="80dp"
+            <!-- Logo -->
+            <ImageView
+                android:layout_width="92dp"
+                android:layout_height="92dp"
                 android:layout_gravity="center"
-                android:background="@drawable/connection_icon_bg"
-                android:layout_marginBottom="24dp" />
+                android:layout_marginBottom="24dp"
+                android:src="@drawable/logo"
+                android:contentDescription="@null"
+                android:importantForAccessibility="no" />
 
             <!-- Header -->
             <TextView
@@ -444,6 +446,18 @@
                         android:textColorHint="#888888"
                         android:inputType="number" />
                 </com.google.android.material.textfield.TextInputLayout>
+
+                <!-- Restores the Mac app's default port (issue #118) -->
+                <TextView
+                    android:id="@+id/resetPortLink"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="end"
+                    android:background="?attr/selectableItemBackground"
+                    android:padding="8dp"
+                    android:text="Use default port (54321)"
+                    android:textColor="#8ab4ff"
+                    android:textSize="13sp" />
 
             </LinearLayout>
 

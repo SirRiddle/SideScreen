@@ -22,14 +22,26 @@ enum CodecLimits {
     /// preserving aspect ratio, flooring each dimension to a multiple of 16
     /// (codec macroblock alignment). Sizes already within the limit pass
     /// through unchanged.
+    ///
+    /// A source with the box's aspect ratio (a HiDPI capture of a panel-sized
+    /// box, e.g. 5760x3600 into 2880x1800) fills the box exactly and gets the
+    /// box itself. The box is a size the client checked against its decoder,
+    /// so flooring it to 16 (2880x1800 -> 2880x1792) would only discard rows
+    /// and force a rescale on panels whose sides are not multiples of 16.
     static func clamp(width: Int, height: Int, maxWidth: Int, maxHeight: Int) -> (width: Int, height: Int) {
         guard width > maxWidth || height > maxHeight else {
             return (width, height)
         }
         let scale = min(Double(maxWidth) / Double(width),
                         Double(maxHeight) / Double(height))
-        let w = max(16, Int((Double(width) * scale).rounded()) & ~15)
-        let h = max(16, Int((Double(height) * scale).rounded()) & ~15)
+        let scaledWidth = Int((Double(width) * scale).rounded())
+        let scaledHeight = Int((Double(height) * scale).rounded())
+        if scaledWidth == maxWidth && scaledHeight == maxHeight {
+            // Even sides: 4:2:0 chroma subsampling needs them.
+            return (max(16, maxWidth & ~1), max(16, maxHeight & ~1))
+        }
+        let w = max(16, scaledWidth & ~15)
+        let h = max(16, scaledHeight & ~15)
         return (w, h)
     }
 
@@ -42,17 +54,70 @@ enum CodecLimits {
     /// CodecCapabilities.REFERENCE_FPS on Android).
     static let clientLimitReferenceFps = 60
 
+    /// Frame rates a type-14 client measures its sustainable size at, in wire
+    /// order (mirrors CodecCapabilities.TABLE_FPS on Android).
+    static let tableFps = [30, 60, 120]
+
     /// The client's limit is a blocks-per-second budget expressed as a frame
     /// size at `clientLimitReferenceFps`. Streaming faster than that spends the
     /// same budget on more frames, so shrink the box's area by
     /// reference/fps (each side by the square root), keeping its aspect.
     /// Slower streams do not grow it: the panel bound still applies.
-    static func scaleLimit(_ limit: (width: Int, height: Int), forFps fps: Int) -> (width: Int, height: Int) {
-        guard fps > clientLimitReferenceFps, limit.width > 0, limit.height > 0 else { return limit }
-        let k = (Double(clientLimitReferenceFps) / Double(fps)).squareRoot()
+    static func scaleLimit(
+        _ limit: (width: Int, height: Int),
+        forFps fps: Int,
+        referenceFps: Int = clientLimitReferenceFps
+    ) -> (width: Int, height: Int) {
+        guard fps > referenceFps, limit.width > 0, limit.height > 0 else { return limit }
+        let k = (Double(referenceFps) / Double(fps)).squareRoot()
         let w = max(16, Int((Double(limit.width) * k).rounded()) & ~15)
         let h = max(16, Int((Double(limit.height) * k).rounded()) & ~15)
         return (w, h)
+    }
+
+    /// The ceiling to encode within at `fps`. With a per-rate table (type
+    /// 14) it is the entry measured at the lowest rate at or above `fps`, and
+    /// beyond the table's fastest rate that entry scaled down by area. A
+    /// measured entry beats the single limit: that one is the smaller of the
+    /// panel and the 60 fps budget, so scaling it for faster streams shrank
+    /// panels whose decoder had budget to spare (issue #78). Without a table,
+    /// the single limit scaled as before. Nil when the client reported nothing.
+    ///
+    /// `preferLowLatency`: above 60 fps, never more pixels per frame than the
+    /// 60 fps budget scaled down by area to `fps` (the 0.12.x sizing). The
+    /// decoder may sustain more, but every extra pixel is also capture, encode
+    /// and USB/WiFi time on each frame: on a 3392x2400 tablet at 120 Hz the
+    /// full 3024x1964 HiDPI frame raised frame age from ~25 to ~35 ms and cut
+    /// the delivered rate, against 2384x1536 for the scaled budget.
+    static func budget(
+        limit: (width: Int, height: Int)?,
+        table: [Int: (width: Int, height: Int)]?,
+        forFps fps: Int,
+        preferLowLatency: Bool = false
+    ) -> (width: Int, height: Int)? {
+        let decoderBudget = decoderBudget(limit: limit, table: table, forFps: fps)
+        guard preferLowLatency, fps > clientLimitReferenceFps, let decoderBudget,
+              let reference = table?[clientLimitReferenceFps] ?? limit else {
+            return decoderBudget
+        }
+        let scaled = scaleLimit(reference, forFps: fps)
+        return scaled.width * scaled.height < decoderBudget.width * decoderBudget.height ? scaled : decoderBudget
+    }
+
+    private static func decoderBudget(
+        limit: (width: Int, height: Int)?,
+        table: [Int: (width: Int, height: Int)]?,
+        forFps fps: Int
+    ) -> (width: Int, height: Int)? {
+        if let table = table, !table.isEmpty {
+            if let rate = table.keys.filter({ $0 >= fps }).min(), let entry = table[rate] {
+                return entry
+            }
+            if let top = table.keys.max(), let entry = table[top] {
+                return scaleLimit(entry, forFps: fps, referenceFps: top)
+            }
+        }
+        return limit.map { scaleLimit($0, forFps: fps) }
     }
 
     /// Clamp into a client-reported ceiling, transposing the box when its

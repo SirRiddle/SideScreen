@@ -45,6 +45,18 @@ class VirtualDisplayManager {
         return ladder
     }
 
+    /// Product ID for the virtual display (issue #108). It used to encode the
+    /// exact physical W×H, so every resolution change produced a "new" display
+    /// to macOS: its wallpaper and arrangement reset each time. Now it only
+    /// encodes what must not collide: orientation (portrait and landscape of
+    /// one panel are different displays — the reason for the old W×H scheme)
+    /// and HiDPI (the display is registered with a different PPI). Changing a
+    /// resolution within those keeps the same display identity.
+    static func productID(physicalWidth: Int, physicalHeight: Int, hiDPI: Bool) -> UInt32 {
+        let orientation: UInt32 = physicalHeight > physicalWidth ? 0x2 : 0x1
+        return 0x5353_0000 | orientation | (hiDPI ? 0x10 : 0)  // 0x5353 = "SS"
+    }
+
     /// Create a virtual display with specified configuration
     /// - Parameters:
     ///   - width: Display width in pixels
@@ -80,9 +92,9 @@ class VirtualDisplayManager {
             height: Double(physH) * 25.4 / ppi
         )
 
-        // Set vendor/product IDs
-        // Use width * 10000 + height so (3840,2400) ≠ (2400,3840) — avoids portrait/landscape collision
-        descriptor.productID = UInt32((physW * 10000 + physH) & 0xFFFFFFFF)
+        // Vendor/product/serial are the display's identity: macOS derives the
+        // display UUID from them and keys wallpaper, arrangement and scaling on it.
+        descriptor.productID = Self.productID(physicalWidth: physW, physicalHeight: physH, hiDPI: hiDPI)
         descriptor.vendorID = 0xEEEE
         descriptor.serialNum = 0x0001
 
@@ -139,6 +151,11 @@ class VirtualDisplayManager {
 
         let modeDesc = hiDPI ? "\(width)x\(height) HiDPI (physical \(physW)x\(physH))" : "\(width)x\(height)"
         print("✅ Virtual display created: \(modeDesc) @ \(refreshRate)Hz (ID: \(display.displayID))")
+        // The UUID is what macOS keys this display's wallpaper and arrangement on;
+        // it must not change when only the resolution does (#108).
+        let uuid = CGDisplayCreateUUIDFromDisplayID(display.displayID)
+            .map { CFUUIDCreateString(nil, $0.takeRetainedValue()) as String } ?? "unknown"
+        debugLog("Virtual display \(modeDesc), product 0x\(String(descriptor.productID, radix: 16)), UUID \(uuid)")
 
         registerScreenParamsObserver()
     }

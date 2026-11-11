@@ -1,6 +1,7 @@
 package com.sidescreen.app
 
 import android.content.Context
+import android.media.MediaFormat
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Process
@@ -25,6 +26,11 @@ class StreamClient(
     private var inputStream: DataInputStream? = null
     private var outputStream: java.io.DataOutputStream? = null
     private var isConnected = false
+
+    /** Dead-link watchdog state (LinkLiveness, issue #72). nanoTime; 0 = not armed. */
+    @Volatile private var lastPongNs = 0L
+
+    @Volatile private var lastPingCallNs = 0L
 
     // Callback includes actual frame size (may differ from buffer.size due to pooling),
     // receive timestamp, and whether the frame can restart HEVC decoding.
@@ -146,10 +152,14 @@ class StreamClient(
                 outputStream = java.io.DataOutputStream(socket?.getOutputStream())
                 streamCodecIsHevc = true
                 codecNegotiated = false
+                prepareAdvertisements()
                 advertiseAvcOnlyIfNeeded() // MUST precede type 8: type 8 can trigger the server's early protocol finish
                 advertiseDecoderLimits() // Also before type 8, for the same reason
                 advertiseDesktopGeometrySupport() // Likewise
+                advertiseIdentity() // Likewise: the Mac picks this tablet's profile when type 8 lands
                 advertiseFrameMetadataSupport()
+                lastPongNs = System.nanoTime() // arm the dead-link watchdog from connect time
+                lastPingCallNs = 0L
                 isConnected = true
                 lastKeyframeReceivedNs = 0L
                 synchronized(keyframeRequestLock) {
@@ -370,10 +380,14 @@ class StreamClient(
                 outputStream = java.io.DataOutputStream(s.getOutputStream())
                 streamCodecIsHevc = true
                 codecNegotiated = false
+                prepareAdvertisements()
                 advertiseAvcOnlyIfNeeded() // MUST precede type 8: type 8 can trigger the server's early protocol finish
                 advertiseDecoderLimits() // Also before type 8, for the same reason
                 advertiseDesktopGeometrySupport() // Likewise
+                advertiseIdentity() // Likewise: the Mac picks this tablet's profile when type 8 lands
                 advertiseFrameMetadataSupport()
+                lastPongNs = System.nanoTime() // arm the dead-link watchdog from connect time
+                lastPingCallNs = 0L
                 isConnected = true
                 diagLog("Wireless connected to $host:$port")
                 onConnectionStatus?.invoke(true)
@@ -412,18 +426,50 @@ class StreamClient(
         }
     }
 
+    /**
+     * Type 18: who this tablet is, so the Mac can apply this tablet's own settings profile.
+     * Before type 8, like every other capability message. Macs that predate the type skip it.
+     */
+    private fun advertiseIdentity() {
+        val id = PreferencesManager(context).deviceId
+        val name = WirelessTabController.defaultDeviceName(context)
+        val payload = DeviceIdentityWire.encode(id, name) ?: return
+        outputStream?.let { out ->
+            out.writeByte(MESSAGE_CLIENT_IDENTITY)
+            out.write(payload)
+            out.flush()
+            diagLog("Advertised identity $id ($name)")
+        }
+    }
+
+    /** Panel and codec the current connection advertises; fixed once per connect so every message agrees. */
+    private var panel: PanelGeometry? = null
+    private var negotiationMime: String = MediaFormat.MIMETYPE_VIDEO_HEVC
+
+    private fun prepareAdvertisements() {
+        panel = PanelGeometry.ofDefaultDisplay(context)
+        val fallback =
+            if (CodecCapabilities.hasHevcDecoder) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
+        negotiationMime = panel?.let { CodecCapabilities.preferredStreamMime(it.width, it.height) } ?: fallback
+    }
+
     private fun advertiseAvcOnlyIfNeeded() {
-        if (CodecCapabilities.hasHevcDecoder) return
+        if (negotiationMime != MediaFormat.MIMETYPE_VIDEO_AVC) return
         outputStream?.let { out ->
             out.writeByte(MESSAGE_CLIENT_AVC_ONLY)
             out.flush()
-            diagLog("Advertised AVC-only (no HEVC decoder on this device)")
+            val why =
+                if (CodecCapabilities.hasHevcDecoder) {
+                    "H.264 sustains a larger picture than HEVC on this device"
+                } else {
+                    "no HEVC decoder on this device"
+                }
+            diagLog("Advertised AVC-only ($why)")
         }
     }
 
     private fun advertiseDecoderLimits() {
-        val mime = CodecCapabilities.streamMime
-        val panel = PanelGeometry.ofDefaultDisplay(context)
+        val mime = negotiationMime
         // Nominal limit only as a fallback: it ignores blocks-per-second, so on most devices it is
         // far too high to protect anything.
         val limit =
@@ -431,20 +477,36 @@ class StreamClient(
                 ?: CodecCapabilities.nominalMaxDecodeSize(mime)
                 ?: return
         val (maxW, maxH) = limit
-        val w = maxW.coerceAtMost(16383)
-        val h = maxH.coerceAtMost(16383)
-        if (w < 256 || h < 256) return
+        if (maxW < 256 || maxH < 256) return
         outputStream?.let { out ->
             out.writeByte(MESSAGE_CLIENT_DECODER_LIMITS)
-            // 7 data bits per byte with the high bit always set: an old Mac
-            // skips unknown types one byte at a time, so payload bytes must
-            // never collide with real message-type values.
-            out.writeByte(0x80 or ((w shr 7) and 0x7F))
-            out.writeByte(0x80 or (w and 0x7F))
-            out.writeByte(0x80 or ((h shr 7) and 0x7F))
-            out.writeByte(0x80 or (h and 0x7F))
+            out.write(DecoderLimitWire.encodeSize(maxW, maxH))
             out.flush()
-            diagLog("Advertised stream limit ${w}x$h for $mime (panel=$panel)")
+            val fps = CodecCapabilities.REFERENCE_FPS
+            diagLog("Advertised stream limit ${maxW}x$maxH at $fps fps for $mime (panel=$panel)")
+        }
+        advertiseDecoderLimitTable(mime)
+    }
+
+    /**
+     * Type 14: the sustainable size at each CodecCapabilities.TABLE_FPS rate, so the Mac can use
+     * the figure for the rate it actually streams at instead of scaling the 60 fps one (issue
+     * #78). Sent after type 11, which stays for Macs that predate this message and skip it.
+     */
+    private fun advertiseDecoderLimitTable(mime: String) {
+        val p = panel ?: return
+        val table = CodecCapabilities.streamLimitTable(mime, p.width, p.height) ?: return
+        if (table.any { (w, h) -> w < 256 || h < 256 }) return
+        outputStream?.let { out ->
+            out.writeByte(MESSAGE_CLIENT_DECODER_LIMIT_TABLE)
+            out.write(DecoderLimitWire.encodeTable(table))
+            out.flush()
+            val desc =
+                CodecCapabilities.TABLE_FPS.zip(table).joinToString {
+                        (fps, size) ->
+                    "${fps}fps=${size.first}x${size.second}"
+                }
+            diagLog("Advertised stream limit table $desc for $mime")
         }
     }
 
@@ -481,7 +543,9 @@ class StreamClient(
                             val buf = ByteArray(8)
                             input.readFully(buf)
                             val sentTime = ByteBuffer.wrap(buf).order(ByteOrder.LITTLE_ENDIAN).long
-                            val rtt = (System.nanoTime() - sentTime) / 1_000_000.0 // ms
+                            val now = System.nanoTime()
+                            lastPongNs = now
+                            val rtt = (now - sentTime) / 1_000_000.0 // ms
                             onLatencyMeasured?.invoke(rtt)
                         }
 
@@ -610,6 +674,25 @@ class StreamClient(
      */
     fun sendPing() {
         if (!isConnected) return
+        val now = System.nanoTime()
+        val previousCall = lastPingCallNs
+        lastPingCallNs = now
+        if (LinkLiveness.timerWasPaused(now, previousCall)) {
+            // Our own process was not running; don't blame the link for that time.
+            lastPongNs = now
+        } else if (LinkLiveness.isDead(now, lastPongNs)) {
+            val silentMs = (now - lastPongNs) / 1_000_000
+            Log.w(TAG, "No pong for ${silentMs}ms — link is dead, closing the socket")
+            diagLog("Dead link: no pong for ${silentMs}ms — closing socket (receive loop then reports the drop)")
+            lastPongNs = 0L
+            // Unblocks readByte() in the receive loop, whose finally{} runs the normal
+            // disconnect path, so the app's involuntary-drop reconnect takes over.
+            try {
+                socket?.close()
+            } catch (_: IOException) {
+            }
+            return
+        }
         val buffer = ByteBuffer.allocate(9).order(ByteOrder.LITTLE_ENDIAN)
         buffer.put(4.toByte()) // Type 4: ping
         buffer.putLong(System.nanoTime())
@@ -778,7 +861,8 @@ class StreamClient(
         private const val MESSAGE_CLIENT_DECODER_LIMITS = 11
         private const val MESSAGE_CLIENT_SUPPORTS_DESKTOP_GEOMETRY = 12
         private const val MESSAGE_DESKTOP_GEOMETRY = 13
-
+        private const val MESSAGE_CLIENT_DECODER_LIMIT_TABLE = 14
+        private const val MESSAGE_CLIENT_IDENTITY = 18 // 15–17 reserved
         private const val FRAME_FLAG_KEYFRAME = 1
         private const val KEYFRAME_REQUEST_FLAG_FORCE = 1
 

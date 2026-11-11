@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and lower (android:fullBackupContent). Keep the wireless pairing
+     token and the per-install device ID out of backups (issue #89): a restored
+     token is a credential copied to another device, and a restored device ID
+     makes two tablets share one profile on the Mac. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="paired_host.xml" />
+    <exclude domain="sharedpref" path="device_identity.xml" />
+</full-backup-content>

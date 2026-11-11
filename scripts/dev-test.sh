@@ -17,54 +17,25 @@ cd "$ROOT_DIR/MacHost"
 swift build -c release 2>&1 | tail -3
 echo "  OK"
 
-# 2. Create .app bundle (keeps permissions across rebuilds)
+# 2. Create .app bundle — same layout and signing as release builds
+# (scripts/package_mac_app.sh: Sparkle.framework is required at launch).
 echo "[2/5] Creating .app bundle..."
-mkdir -p "$APP_DIR/Contents/MacOS"
-mkdir -p "$APP_DIR/Contents/Resources"
-cp .build/release/SideScreen "$APP_DIR/Contents/MacOS/"
-
-if [ -f "Resources/AppIcon.icns" ]; then
-    cp Resources/AppIcon.icns "$APP_DIR/Contents/Resources/"
+BIN_DIR="$(swift build -c release --show-bin-path)"
+SPARKLE="$BIN_DIR/Sparkle.framework"
+[ -d "$SPARKLE" ] || SPARKLE="$PWD/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+"$ROOT_DIR/scripts/package_mac_app.sh" "$BIN_DIR/SideScreen" "$SPARKLE" "$VERSION" "$APP_DIR" >/dev/null
+# The fork identity keeps permissions across rebuilds; ad-hoc when it isn't installed.
+IDENTITY="${SIDESCREEN_SIGN_IDENTITY:-}"
+if [ -z "$IDENTITY" ] && security find-identity -p codesigning 2>/dev/null | grep -q "SideScreen Fork Code Signing"; then
+    IDENTITY="SideScreen Fork Code Signing"
 fi
-
-cat > "$APP_DIR/Contents/Info.plist" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key>
-    <string>SideScreen</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.sidescreen.app</string>
-    <key>CFBundleName</key>
-    <string>Side Screen</string>
-    <key>CFBundleVersion</key>
-    <string>$VERSION</string>
-    <key>CFBundleShortVersionString</key>
-    <string>$VERSION</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
-    <key>LSUIElement</key>
-    <false/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSScreenCaptureUsageDescription</key>
-    <string>Side Screen needs screen recording access to capture your virtual display.</string>
-</dict>
-</plist>
-EOF
-
-codesign --force --deep --sign - --entitlements "$ROOT_DIR/MacHost/SideScreen.entitlements" "$APP_DIR" 2>/dev/null
-echo "  OK"
+"$ROOT_DIR/scripts/sign_app.sh" "$APP_DIR" "${IDENTITY:--}" >/dev/null 2>&1
+echo "  OK (${IDENTITY:-ad-hoc})"
 
 # 3. Build Android
 echo "[3/5] Building Android..."
 cd "$ROOT_DIR/AndroidClient"
-export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+export JAVA_HOME="${JAVA_HOME:-/Applications/Android Studio.app/Contents/jbr/Contents/Home}"
 ./gradlew assembleDebug -q
 APK="$ROOT_DIR/AndroidClient/app/build/outputs/apk/debug/app-debug.apk"
 echo "  OK"

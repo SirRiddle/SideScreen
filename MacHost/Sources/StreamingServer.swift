@@ -34,6 +34,21 @@ private enum WireMessage {
     /// only. Sent ONLY to clients that sent clientSupportsDesktopGeometry —
     /// older clients disconnect on unknown message types.
     static let desktopGeometry: UInt8 = 13
+    /// Client→server, 12-byte payload: the client's sustainable decode size
+    /// at each CodecLimits.tableFps rate (three 4-byte sizes in the type-11
+    /// encoding, every byte high-bit set). Sent after type 11, which older
+    /// hosts still read; hosts that know this type prefer it (issue #78).
+    static let clientDecoderLimitTable: UInt8 = 14
+    // 15–17 are reserved.
+    /// Client→server, variable payload (DeviceIdentityCodec, every byte
+    /// high-bit set): the tablet's stable per-install UUID and name. Sent
+    /// BEFORE type 8, so the host knows which profile to apply before the
+    /// display config goes out.
+    static let clientIdentity: UInt8 = 18
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
 private extension NWEndpoint {
@@ -194,6 +209,14 @@ class StreamingServer {
     var expectedAuthToken: Data?
     var onWirelessClientPaired: ((String) -> Void)?
 
+    /// Asked once per connection, on the network queue, right before the
+    /// display config would go out: `key` is the tablet's profile key (type 18
+    /// UUID, or `name:<handshake name>` for wireless apps that predate it;
+    /// nil for older USB apps). Return true to start streaming now. Return
+    /// false to hold the startup while the owner rebuilds the display for
+    /// this tablet's profile, then call `resumeProtocolStartup()`.
+    var onPrepareForClient: ((_ key: String?, _ name: String) -> Bool)?
+
     // Code pairing (issue #35): when non-nil, a pre-auth "SSPC" request
     // carrying this one-time code is answered with the real auth token, and
     // the client reconnects through the normal SSWA handshake. Only honored
@@ -251,8 +274,18 @@ class StreamingServer {
     private var clientIsAvcOnly = false
     /// Max decode size reported by the connected client (issue #41).
     private(set) var clientDecodeLimits: (width: Int, height: Int)?
+    /// Sustainable decode size per frame rate (type 14), keyed by fps.
+    private(set) var clientDecodeLimitTable: [Int: (width: Int, height: Int)]?
     /// Set when the client opts in via type 12. Gates desktopGeometry sends.
     private var clientSupportsDesktopGeometry = false
+    /// Type 18 identity of the connected client, if it sent one.
+    private var clientIdentity: DeviceIdentity?
+    /// Name from the wireless auth handshake (nil over USB).
+    private var handshakeDeviceName: String?
+    /// onPrepareForClient already ran for this connection.
+    private var startupPrepared = false
+    /// Startup is waiting for the owner's resumeProtocolStartup().
+    private var startupHeld = false
     /// Logical desktop size, reported alongside the encoded size for display.
     private var desktopWidth = 0
     private var desktopHeight = 0
@@ -350,8 +383,39 @@ class StreamingServer {
         }
     }
 
+    /// How long a newcomer may take to prove itself while another client is
+    /// streaming (issue #69): finish the wireless handshake, or (USB) send its
+    /// first bytes. A LAN peer that hasn't authenticated by then is dropped.
+    static let admissionTimeout: TimeInterval = 5
+    /// A loopback newcomer that stays silent this long while another client
+    /// streams is taken for a legacy client (they send no capability adverts)
+    /// and gets the slot. Longer than the tablet checklist probe's 700 ms read
+    /// timeout, so the probe gives up before it could evict anyone.
+    static let loopbackSilenceGrace: TimeInterval = 1.5
+
+    /// A connection that arrived while a client was streaming, being admitted
+    /// on the side (issue #69). It replaces the live client only once admitted;
+    /// a peer that fails or never finishes admission costs the user nothing.
+    private var pendingConnection: NWConnection?
+
     private func handleConnection(_ newConnection: NWConnection) {
         debugLog("New connection incoming...")
+
+        if connection != nil, connectionReady {
+            stagePendingConnection(newConnection)
+            return
+        }
+        adoptConnection(newConnection)
+        newConnection.start(queue: networkQueue)
+    }
+
+    /// Make `newConnection` the client: drop the previous one (and any
+    /// newcomer still being admitted) and reset all per-client state.
+    private func adoptConnection(_ newConnection: NWConnection) {
+        if let pending = pendingConnection, pending !== newConnection {
+            pending.cancel()
+        }
+        pendingConnection = nil
 
         // Clean up old connection properly
         if let oldConnection = connection {
@@ -363,14 +427,19 @@ class StreamingServer {
         clientSupportsFrameMetadata = false
         clientIsAvcOnly = false
         clientDecodeLimits = nil
+        clientDecodeLimitTable = nil
         clientSupportsDesktopGeometry = false
+        clientIdentity = nil
+        handshakeDeviceName = nil
+        startupPrepared = false
+        startupHeld = false
         waitingForSyncFrame = true
         generationLock.withLock { $0 &+= 1 }
         inputBuffer.removeAll(keepingCapacity: true)
         connection = newConnection
         droppedFrames = 0
 
-        connection?.stateUpdateHandler = { [weak self] state in
+        newConnection.stateUpdateHandler = { [weak self] state in
             debugLog("Connection state: \(state)")
             switch state {
             case .ready:
@@ -385,8 +454,114 @@ class StreamingServer {
                 break
             }
         }
+    }
 
-        connection?.start(queue: networkQueue)
+    // MARK: - Admission while a client streams (issue #69)
+
+    /// Any TCP connect used to evict the streaming client before the newcomer
+    /// was checked at all: a port scan, the tablet's own checklist probe, a
+    /// rejected token or a second tablet's code pairing all dropped the stream.
+    /// Now the newcomer is admitted on the side and only then swapped in.
+    private func stagePendingConnection(_ newConnection: NWConnection) {
+        if let previous = pendingConnection {
+            debugLog("A newer connection replaces the one still being admitted")
+            previous.cancel()
+        }
+        pendingConnection = newConnection
+        debugLog("A client is streaming — admitting the newcomer before it gets the slot")
+
+        newConnection.stateUpdateHandler = { [weak self] state in
+            guard let self = self else { return }
+            switch state {
+            case .ready:
+                self.admitPendingConnection(newConnection)
+            case .failed, .cancelled:
+                if self.pendingConnection === newConnection {
+                    self.pendingConnection = nil
+                    debugLog("Newcomer left before admission — streaming client kept")
+                }
+            default:
+                break
+            }
+        }
+        newConnection.start(queue: networkQueue)
+
+        networkQueue.asyncAfter(deadline: .now() + Self.admissionTimeout) { [weak self] in
+            guard let self = self, self.pendingConnection === newConnection else { return }
+            debugLog("Newcomer not admitted within \(Int(Self.admissionTimeout))s — dropped, streaming client kept")
+            self.pendingConnection = nil
+            newConnection.cancel()
+        }
+    }
+
+    private func admitPendingConnection(_ conn: NWConnection) {
+        guard pendingConnection === conn else { return }
+        if conn.endpoint.isLoopback {
+            admitPendingLoopback(conn)
+            return
+        }
+        guard let expected = expectedAuthToken else {
+            debugLog("Rejecting non-loopback newcomer: wireless mode not active — streaming client kept")
+            pendingConnection = nil
+            conn.cancel()
+            return
+        }
+        debugLog("Newcomer via LAN — running auth handshake on the side")
+        runAuthHandshake(connection: conn, expectedToken: expected) { [weak self] deviceName in
+            guard let self = self, self.pendingConnection === conn else {
+                conn.cancel()
+                return
+            }
+            self.promotePendingConnection(conn)
+            self.completeWirelessAdmission(on: conn, deviceName: deviceName)
+        }
+    }
+
+    /// USB clients advertise their capabilities the moment they connect, so
+    /// a loopback newcomer gets the slot on its first bytes. One that closes
+    /// without a word (the tablet's checklist probe) never does; one that
+    /// stays open but silent past the grace is a legacy client and does.
+    private func admitPendingLoopback(_ conn: NWConnection) {
+        var settled = false
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 256) { [weak self] data, _, _, error in
+            guard let self = self else { return }
+            if settled {
+                // Promoted by the grace timer before this arrived: it is the
+                // client's first input, so hand it to the protocol.
+                if self.connection === conn, let data = data, !data.isEmpty {
+                    self.inputBuffer.append(data)
+                    self.processInputBuffer(connection: conn)
+                }
+                return
+            }
+            settled = true
+            guard self.pendingConnection === conn else { return }
+            guard let data = data, !data.isEmpty, error == nil else {
+                debugLog("Loopback newcomer closed without speaking — streaming client kept")
+                self.pendingConnection = nil
+                conn.cancel()
+                return
+            }
+            self.promotePendingConnection(conn)
+            self.inputBuffer.append(data)
+            debugLog("Client connected via loopback (USB) — skipping auth")
+            self.beginExistingProtocol(on: conn)
+            self.processInputBuffer(connection: conn)
+        }
+        networkQueue.asyncAfter(deadline: .now() + Self.loopbackSilenceGrace) { [weak self] in
+            guard let self = self, !settled, self.pendingConnection === conn else { return }
+            settled = true
+            debugLog("Silent loopback newcomer still open after \(Self.loopbackSilenceGrace)s — taking it as a legacy client")
+            self.promotePendingConnection(conn)
+            self.beginExistingProtocol(on: conn)
+        }
+    }
+
+    /// The admitted newcomer becomes the client; the streaming one is dropped.
+    private func promotePendingConnection(_ conn: NWConnection) {
+        guard pendingConnection === conn else { return }
+        debugLog("Newcomer admitted — it replaces the streaming client")
+        adoptConnection(conn)
     }
 
     private func onConnectionReady(_ conn: NWConnection) {
@@ -401,7 +576,17 @@ class StreamingServer {
             return
         }
         debugLog("Client connected via LAN — running auth handshake")
-        runAuthHandshake(connection: conn, expectedToken: expected)
+        runAuthHandshake(connection: conn, expectedToken: expected) { [weak self] deviceName in
+            self?.completeWirelessAdmission(on: conn, deviceName: deviceName)
+        }
+    }
+
+    /// After a successful SSWA handshake on the current connection.
+    private func completeWirelessAdmission(on conn: NWConnection, deviceName: String) {
+        guard connection === conn else { return }
+        handshakeDeviceName = deviceName
+        onWirelessClientPaired?(deviceName)
+        beginExistingProtocol(on: conn)
     }
 
     private func beginExistingProtocol(on conn: NWConnection) {
@@ -417,7 +602,18 @@ class StreamingServer {
     }
 
     private func finishProtocolStartup(on conn: NWConnection) {
-        guard connection === conn, !isStopped, !connectionReady else { return }
+        guard connection === conn, !isStopped, !connectionReady, !startupHeld else { return }
+
+        if !startupPrepared, let prepare = onPrepareForClient {
+            startupPrepared = true
+            let key = clientIdentity?.id ?? DeviceProfileStore.fallbackKey(deviceName: handshakeDeviceName)
+            let name = clientIdentity?.name.nilIfEmpty ?? handshakeDeviceName ?? ""
+            if !prepare(key, name) {
+                startupHeld = true
+                debugLog("Startup held — applying this tablet's profile first")
+                return
+            }
+        }
 
         let codec: StreamCodec = clientIsAvcOnly ? .h264 : .hevc
         if clientIsAvcOnly {
@@ -440,7 +636,14 @@ class StreamingServer {
         onClientConnected?()
     }
 
-    private func runAuthHandshake(connection conn: NWConnection, expectedToken: Data) {
+    /// SSWA/SSPC handshake on `conn`, which need not be the current connection
+    /// (a newcomer is admitted on the side while a client streams, #69).
+    /// `onAuthenticated` runs after a valid token was answered with OK.
+    private func runAuthHandshake(
+        connection conn: NWConnection,
+        expectedToken: Data,
+        onAuthenticated: @escaping (_ deviceName: String) -> Void
+    ) {
         // Read fixed prefix [magic 4][token 32][name_len 1] = 37 bytes.
         conn.receive(minimumIncompleteLength: HandshakeCodec.fixedPrefixLen,
                      maximumLength: HandshakeCodec.fixedPrefixLen) { [weak self] prefixData, _, _, error in
@@ -471,8 +674,7 @@ class StreamingServer {
                     if WirelessAuth.validate(parsed.token, expected: expectedToken) {
                         debugLog("Wireless auth OK — device: \(parsed.deviceName)")
                         self.sendAuthResponse(conn, status: .ok, thenClose: false)
-                        self.onWirelessClientPaired?(parsed.deviceName)
-                        self.beginExistingProtocol(on: conn)
+                        onAuthenticated(parsed.deviceName)
                     } else {
                         debugLog("Wireless auth rejected: token mismatch")
                         self.sendAuthResponse(conn, status: .invalidToken, thenClose: true)
@@ -668,7 +870,10 @@ class StreamingServer {
         }
 
         connection.receive(minimumIncompleteLength: 1, maximumLength: 256) { [weak self] data, _, isComplete, error in
-            guard let self = self, self.isReceiving, !self.isStopped else { return }
+            // `self.connection === connection`: a superseded connection's late
+            // completion (its cancel error) must not stop the new client's
+            // loop or clear its input.
+            guard let self = self, self.isReceiving, !self.isStopped, self.connection === connection else { return }
 
             if error != nil || isComplete {
                 self.isReceiving = false
@@ -788,6 +993,47 @@ class StreamingServer {
                     }
                 }
 
+            case WireMessage.clientDecoderLimitTable:
+                // Type + 12 payload bytes: one (w, h) pair per
+                // CodecLimits.tableFps entry, in order, each in the type-11
+                // encoding. Sent BEFORE type 8, like type 11.
+                let payloadCount = 4 * CodecLimits.tableFps.count
+                guard inputBuffer.count >= 1 + payloadCount else { return }
+
+                let payload = (1...payloadCount).map { inputByte(at: $0) }
+                consumeInputBytes(1 + payloadCount)
+                guard payload.allSatisfy({ $0 & 0x80 != 0 }) else {
+                    debugLog("Malformed decoder-limit-table payload — ignoring")
+                    continue
+                }
+                var table: [Int: (width: Int, height: Int)] = [:]
+                for (i, fps) in CodecLimits.tableFps.enumerated() {
+                    let w = (Int(payload[4 * i] & 0x7F) << 7) | Int(payload[4 * i + 1] & 0x7F)
+                    let h = (Int(payload[4 * i + 2] & 0x7F) << 7) | Int(payload[4 * i + 3] & 0x7F)
+                    // Anything below QVGA-ish is a nonsense report — drop the whole table.
+                    guard w >= 256, h >= 256 else {
+                        table.removeAll()
+                        break
+                    }
+                    table[fps] = (w, h)
+                }
+                guard !table.isEmpty else {
+                    debugLog("Decoder limit table has a nonsense entry — ignoring")
+                    continue
+                }
+                clientDecodeLimitTable = table
+                let desc = CodecLimits.tableFps.compactMap { fps in table[fps].map { "\(fps)fps=\($0.width)x\($0.height)" } }
+                debugLog("Client decoder limit table: \(desc.joined(separator: ", "))")
+                if connectionReady {
+                    // Same late-arrival handling as type 11.
+                    debugLog("Decoder limit table arrived late — re-negotiating")
+                    let before = (displayWidth, displayHeight)
+                    onCodecNegotiated?(clientIsAvcOnly ? .h264 : .hevc)
+                    if (displayWidth, displayHeight) != before {
+                        sendDisplaySize()
+                    }
+                }
+
             case WireMessage.clientSupportsDesktopGeometry:
                 // Payload-free opt-in (same convention as types 8 and 9), sent
                 // BEFORE type 8 so it lands before finishProtocolStartup runs.
@@ -800,10 +1046,50 @@ class StreamingServer {
                     if connectionReady { sendDesktopGeometry() }
                 }
 
+            case WireMessage.clientIdentity:
+                // Type + DeviceIdentityCodec payload (32-byte UUID, count
+                // byte, 2×count name bytes; all high-bit). Sent BEFORE type 8
+                // so the identity is known when the profile is chosen.
+                guard inputBuffer.count >= 1 + DeviceIdentityCodec.headerLength else { return }
+                let countByte = inputByte(at: DeviceIdentityCodec.encodedUUIDLength + 1)
+                guard let payloadLength = DeviceIdentityCodec.payloadLength(countByte: countByte) else {
+                    debugLog("Malformed identity count byte — ignoring")
+                    consumeInputBytes(1)
+                    continue
+                }
+                guard inputBuffer.count >= 1 + payloadLength else { return }
+
+                let payload = Data(inputBuffer.dropFirst().prefix(payloadLength))
+                consumeInputBytes(1 + payloadLength)
+                guard let parsed = DeviceIdentityCodec.decode(payload) else {
+                    debugLog("Malformed identity payload — ignoring")
+                    continue
+                }
+                if clientIdentity == nil {
+                    clientIdentity = parsed
+                    debugLog("Client identity: \(parsed.id) (\(parsed.name.isEmpty ? "unnamed" : parsed.name))")
+                    if startupPrepared {
+                        // Landed after the legacy grace already started the
+                        // stream: this session keeps its settings, the
+                        // tablet's profile applies on its next connection.
+                        debugLog("Identity arrived after startup — profile applies on next connect")
+                    }
+                }
+
             default:
                 debugLog("Unknown client input type: \(msgType)")
                 consumeInputBytes(1)
             }
+        }
+    }
+
+    /// Finish a startup that onPrepareForClient held. Safe to call from any
+    /// thread, and a no-op if that client has gone in the meantime.
+    func resumeProtocolStartup() {
+        networkQueue.async { [weak self] in
+            guard let self = self, self.startupHeld, let conn = self.connection else { return }
+            self.startupHeld = false
+            self.finishProtocolStartup(on: conn)
         }
     }
 
@@ -974,6 +1260,8 @@ class StreamingServer {
         frameQueue.sync {}
         receiveQueue.sync {}
 
+        pendingConnection?.cancel()
+        pendingConnection = nil
         connection?.cancel()
         listener?.cancel()
         connection = nil

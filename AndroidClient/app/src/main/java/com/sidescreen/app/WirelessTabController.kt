@@ -1,7 +1,9 @@
 package com.sidescreen.app
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.provider.Settings
 import android.view.View
 import android.widget.Button
 import android.widget.TextView
@@ -127,21 +129,24 @@ class WirelessTabController(
      * confusing because it could run silently while the user toggled tabs.
      */
     fun show() {
+        // A saved pairing wins over the camera state (issue #73): a tablet that
+        // paired by code with the camera permanently denied must still reach its
+        // Reconnect card on launch. Same order as onStreamDisconnected.
+        val entry = storage.load()
         when {
-            cameraPerm.isPermanentlyDenied() -> transition(State.PERM_DENIED)
-            storage.load() == null -> transition(State.FIRST_TIME)
-            else -> {
-                val entry = storage.load()!!
+            entry != null -> {
                 views.idleMacName.text = entry.macName
                 views.idleMacIp.text = "${entry.host}:${entry.port}"
                 transition(State.PAIRED_IDLE)
             }
+            cameraPerm.isPermanentlyDenied() -> transition(State.PERM_DENIED)
+            else -> transition(State.FIRST_TIME)
         }
     }
 
     fun onScanResult(url: String) {
         val parsed = PairingURL.parse(url) ?: return
-        val deviceName = defaultDeviceName()
+        val deviceName = defaultDeviceName(activity)
         storage.save(PairedHostStorage.Entry(parsed.host, parsed.port, parsed.token, parsed.macName))
         showConnecting("Connecting to ${parsed.macName}", "${parsed.host}:${parsed.port}")
         onConnectRequested(parsed.host, parsed.port, parsed.token, deviceName, parsed.macName)
@@ -157,7 +162,7 @@ class WirelessTabController(
         token: ByteArray,
         macName: String,
     ) {
-        val deviceName = defaultDeviceName()
+        val deviceName = defaultDeviceName(activity)
         storage.save(PairedHostStorage.Entry(host, port, token, macName))
         showConnecting("Connecting to $macName", "$host:$port")
         onConnectRequested(host, port, token, deviceName, macName)
@@ -244,7 +249,7 @@ class WirelessTabController(
     }
 
     private fun attemptAutoConnect(entry: PairedHostStorage.Entry) {
-        val deviceName = defaultDeviceName()
+        val deviceName = defaultDeviceName(activity)
         onConnectRequested(entry.host, entry.port, entry.token, deviceName, entry.macName)
     }
 
@@ -253,13 +258,22 @@ class WirelessTabController(
         const val REQ_CAMERA = 1002
 
         /**
-         * The device name sent in handshakes. The wire format caps the name at
-         * 64 UTF-8 BYTES (not chars — a char-truncated non-ASCII model name can
-         * still overflow and fail the codec's require), and Build.MODEL can
-         * legally be blank on some devices.
+         * The device name sent in handshakes and in the identity message: the
+         * name the user sees for their own device (Settings → About, Bluetooth —
+         * "V50S ThinQ", "Galaxy Tab S9", or whatever they renamed it to), falling
+         * back to the model code. The wire format caps the name at 64 UTF-8 BYTES
+         * (not chars — a char-truncated non-ASCII name can still overflow and
+         * fail the codec's require), and every source can legally be blank.
          */
-        fun defaultDeviceName(): String {
-            var name = android.os.Build.MODEL?.takeIf { it.isNotBlank() } ?: "Android"
+        fun defaultDeviceName(context: Context): String {
+            val resolver = context.contentResolver
+            val candidates =
+                sequence {
+                    yield(runCatching { Settings.Global.getString(resolver, Settings.Global.DEVICE_NAME) }.getOrNull())
+                    yield(runCatching { Settings.Secure.getString(resolver, "bluetooth_name") }.getOrNull())
+                    yield(android.os.Build.MODEL)
+                }
+            var name = candidates.firstOrNull { !it.isNullOrBlank() }?.trim() ?: "Android"
             while (name.toByteArray(Charsets.UTF_8).size > 64) {
                 name = name.dropLast(1)
             }

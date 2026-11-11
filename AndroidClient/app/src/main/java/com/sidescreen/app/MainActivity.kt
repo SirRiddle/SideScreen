@@ -32,6 +32,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.constraintlayout.widget.ConstraintSet
+import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.slider.Slider
@@ -40,6 +41,7 @@ import com.sidescreen.app.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -91,6 +93,9 @@ class MainActivity : AppCompatActivity() {
     /** User pressed Disconnect — suppresses auto-reconnect until the next explicit Connect. */
     private var userInitiatedDisconnect = false
 
+    /** Frames that arrived with no decoder to take them (receive thread only; issue #74). */
+    private var framesDroppedWithoutDecoder = 0
+
     /** In-flight involuntary-drop reconnect loop. */
     private var reconnectJob: kotlinx.coroutines.Job? = null
 
@@ -100,6 +105,15 @@ class MainActivity : AppCompatActivity() {
     // Checklist status handler
     private val checklistHandler = Handler(Looper.getMainLooper())
     private var checklistRunnable: Runnable? = null
+
+    // USB checklist gating (issue #70). The probe opens a real TCP connection, and the Mac
+    // hands its single client slot to every new connection, so it must never run while this
+    // activity is not visible, or while a connection is being set up.
+    private var checklistRequested = false
+    private var activityStarted = false
+    private var checklistProbeJob: kotlinx.coroutines.Job? = null
+
+    @Volatile private var connectInFlight = false
     private var isConnected = false // Track connection state to prevent checklist conflicts
     private var activeSettingsDialog: Dialog? = null
 
@@ -414,9 +428,7 @@ class MainActivity : AppCompatActivity() {
                     .toString()
                     .ifEmpty { "127.0.0.1" }
             val port =
-                binding.portInput.text
-                    .toString()
-                    .toIntOrNull() ?: 54321
+                PreferencesManager.parsePort(binding.portInput.text) ?: PreferencesManager.DEFAULT_PORT
 
             // Convert localhost to 127.0.0.1 for better Android compatibility
             if (host.equals("localhost", ignoreCase = true)) {
@@ -445,18 +457,40 @@ class MainActivity : AppCompatActivity() {
             binding.showAdvanced.text = if (advancedVisible) "Hide Advanced Settings" else "Advanced Settings"
         }
 
+        // Custom USB port survives relaunches (issue #118); "Use default port" restores 54321.
+        binding.portInput.setText(prefs.usbPort.toString())
+        binding.portInput.doAfterTextChanged { text ->
+            PreferencesManager.parsePort(text)?.let { prefs.usbPort = it }
+        }
+        binding.resetPortLink.setOnClickListener {
+            prefs.usbPort = PreferencesManager.DEFAULT_PORT
+            binding.portInput.setText(PreferencesManager.DEFAULT_PORT.toString())
+        }
+
         // Initial status
         updateStatus("Ready to connect")
     }
 
     private fun showError(message: String) {
         runOnUiThread {
-            android.app.AlertDialog
-                .Builder(this)
-                .setTitle("Connection Error")
-                .setMessage(message)
-                .setPositiveButton("OK", null)
-                .show()
+            // connect() fails on a background thread, often seconds after the user rotated
+            // the tablet or left the app. By then this Activity is destroyed and Dialog.show()
+            // throws BadTokenException (top crash on 1.0.2). The status line already says
+            // "Connection failed", so just drop the dialog.
+            if (isFinishing || isDestroyed) {
+                mainDiag("showError skipped — activity gone: $message")
+                return@runOnUiThread
+            }
+            try {
+                android.app.AlertDialog
+                    .Builder(this)
+                    .setTitle("Connection Error")
+                    .setMessage(message)
+                    .setPositiveButton("OK", null)
+                    .show()
+            } catch (e: android.view.WindowManager.BadTokenException) {
+                mainDiag("showError failed — no window token: ${e.message}")
+            }
         }
     }
 
@@ -483,14 +517,11 @@ class MainActivity : AppCompatActivity() {
                         var newX = event.rawX + overlayDx
                         var newY = event.rawY + overlayDy
 
-                        // Get screen bounds
+                        // Constrain to the parent. The overlay can be wider than a
+                        // phone in portrait; OverlayBounds pins it instead of throwing.
                         val parent = view.parent as View
-                        val maxX = parent.width - view.width.toFloat()
-                        val maxY = parent.height - view.height.toFloat()
-
-                        // Constrain to screen bounds
-                        newX = newX.coerceIn(0f, maxX)
-                        newY = newY.coerceIn(0f, maxY)
+                        newX = OverlayBounds.clamp(newX, parent.width, view.width)
+                        newY = OverlayBounds.clamp(newY, parent.height, view.height)
 
                         view
                             .animate()
@@ -1004,8 +1035,14 @@ class MainActivity : AppCompatActivity() {
             }
 
         if (videoDecoder != null && decoderUsingTextureView == useTextureView) {
-            videoDecoder?.updateResolution(displayWidth, displayHeight)
-            return
+            try {
+                videoDecoder?.updateResolution(displayWidth, displayHeight)
+                return
+            } catch (e: Exception) {
+                // Restarting the codec in place failed (upstream 1.0.1 crash): build a fresh
+                // decoder below instead, which reports failure in the UI rather than crashing.
+                mainDiag("Decoder resize FAILED: ${e.message} — recreating")
+            }
         }
 
         videoDecoder?.release()
@@ -1073,7 +1110,7 @@ class MainActivity : AppCompatActivity() {
                                 this,
                                 "No video output — the stream resolution may exceed " +
                                     "this tablet's decoder limit$capText. " +
-                                    "Lower the resolution or disable HiDPI on the Mac.",
+                                    "Lower the resolution or refresh rate, or disable HiDPI, on the Mac.",
                                 android.widget.Toast.LENGTH_LONG,
                             ).show()
                     }
@@ -1088,6 +1125,16 @@ class MainActivity : AppCompatActivity() {
             log("❌ Failed to initialize decoder: ${e.message}")
             runOnUiThread {
                 updateStatus("Video decoder failed: ${e.message}")
+                // The status text sits in the settings panel, hidden while streaming —
+                // without this the user would just see a black screen.
+                if (isConnected) {
+                    android.widget.Toast
+                        .makeText(
+                            this,
+                            "Video decoder failed — disconnect and reconnect to retry.",
+                            android.widget.Toast.LENGTH_LONG,
+                        ).show()
+                }
             }
         }
     }
@@ -1159,7 +1206,13 @@ class MainActivity : AppCompatActivity() {
                 dec.decode(frameData, frameSize, timestamp, isKeyframe)
             } else {
                 streamClient?.releaseBuffer(frameData)
-                mainDiag("FRAME DROPPED: videoDecoder is null (buffer released)")
+                // Normal while backgrounded (surface gone, decoder released) and on AVC-only
+                // devices before codec negotiation: log the first drop and then every 300th,
+                // not every frame — each line is a disk append (issue #74).
+                framesDroppedWithoutDecoder++
+                if (framesDroppedWithoutDecoder == 1 || framesDroppedWithoutDecoder % 300 == 0) {
+                    mainDiag("FRAME DROPPED: no decoder ($framesDroppedWithoutDecoder so far, buffers released)")
+                }
             }
         }
 
@@ -1174,6 +1227,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         streamClient?.onConnectionStatus = { connected ->
+            connectInFlight = false
             runOnUiThread {
                 isConnected = connected
                 applyHighRefreshMode(connected)
@@ -1331,7 +1385,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                val deviceName = WirelessTabController.defaultDeviceName()
+                val deviceName = WirelessTabController.defaultDeviceName(this@MainActivity)
                 pairingJob =
                     lifecycleScope.launch(Dispatchers.IO) {
                         try {
@@ -1391,7 +1445,12 @@ class MainActivity : AppCompatActivity() {
                 log("Connecting wirelessly to $host:$port...")
                 streamClient = StreamClient(host, port, applicationContext)
                 setupStreamClientCallbacks()
-                streamClient?.connectWireless(token, deviceName)
+                connectInFlight = true
+                try {
+                    streamClient?.connectWireless(token, deviceName)
+                } finally {
+                    connectInFlight = false
+                }
                 // NOTE: onConnectSuccess is fired from the onConnectionStatus(true)
                 // listener (above) right after handshake OK — not here. This line
                 // would otherwise run AFTER the receive loop exits, i.e. AFTER
@@ -1444,6 +1503,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 streamClient?.onConnectionStatus = { connected ->
+                    connectInFlight = false
                     runOnUiThread {
                         // Update connection state flag
                         isConnected = connected
@@ -1534,7 +1594,12 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                streamClient?.connect()
+                connectInFlight = true
+                try {
+                    streamClient?.connect()
+                } finally {
+                    connectInFlight = false
+                }
             } catch (e: Exception) {
                 val errorMessage =
                     when {
@@ -1770,20 +1835,54 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        activityStarted = true
+        syncChecklistLoop()
+    }
+
+    override fun onStop() {
+        activityStarted = false
+        syncChecklistLoop()
+        super.onStop()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         stopChecklistUpdates()
+        // cleanup() reports the disconnect, and that handler asks for the checklist again;
+        // syncChecklistLoop() refuses on a destroyed activity, so nothing re-arms it (#70).
         cleanup()
     }
 
     // ==================== Connection Checklist ====================
 
+    /** The current screen wants the USB checklist. It runs only while the activity is visible. */
     private fun startChecklistUpdates() {
-        // Stop any existing runnable first to prevent duplicates
-        checklistRunnable?.let {
-            checklistHandler.removeCallbacks(it)
-        }
+        checklistRequested = true
+        syncChecklistLoop()
+    }
 
+    private fun stopChecklistUpdates() {
+        checklistRequested = false
+        syncChecklistLoop()
+    }
+
+    /**
+     * Run the 2 s checklist loop only while it is requested AND the activity is started and not
+     * destroyed (issue #70: it kept probing the Mac from the background forever). Stopping also
+     * cancels a probe already dispatched.
+     */
+    private fun syncChecklistLoop() {
+        val shouldRun = checklistRequested && activityStarted && !isDestroyed && !isFinishing
+        if (shouldRun && checklistRunnable != null) return
+        checklistRunnable?.let { checklistHandler.removeCallbacks(it) }
+        checklistRunnable = null
+        if (!shouldRun) {
+            checklistProbeJob?.cancel()
+            checklistProbeJob = null
+            return
+        }
         checklistRunnable =
             object : Runnable {
                 override fun run() {
@@ -1792,13 +1891,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         checklistHandler.post(checklistRunnable!!)
-    }
-
-    private fun stopChecklistUpdates() {
-        checklistRunnable?.let {
-            checklistHandler.removeCallbacks(it)
-            checklistRunnable = null
-        }
     }
 
     private fun updateChecklist() {
@@ -1830,40 +1922,45 @@ class MainActivity : AppCompatActivity() {
         val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         val isUsbConnected = usbManager.deviceList.isNotEmpty() || isCharging()
 
-        // Check Mac Server (try to connect to port)
-        lifecycleScope.launch(Dispatchers.IO) {
-            // While streaming the checklist is stale by definition — a probe
-            // would also steal the single client slot. Report connected state.
-            if (isConnected) {
-                runOnUiThread {
-                    updateChecklistItem(binding.checkMacServer, true)
-                    updateMainStatus(true)
-                    binding.statusText.text = "Connected - Streaming active"
+        // Check Mac Server (try to connect to port). One probe at a time; kept so
+        // stopChecklistUpdates() can cancel it.
+        if (checklistProbeJob?.isActive == true) return
+        checklistProbeJob =
+            lifecycleScope.launch(Dispatchers.IO) {
+                // While streaming the checklist is stale by definition — a probe
+                // would also steal the single client slot. Report connected state.
+                if (isConnected) {
+                    runOnUiThread {
+                        updateChecklistItem(binding.checkMacServer, true)
+                        updateMainStatus(true)
+                        binding.statusText.text = "Connected - Streaming active"
+                    }
+                    return@launch
                 }
-                return@launch
+
+                // A connect (user tap or auto-reconnect) is being set up: a probe now would
+                // land on the Mac as a newer client and evict it (#70).
+                if (connectInFlight || !isActive) return@launch
+                val port =
+                    PreferencesManager.parsePort(binding.portInput.text) ?: PreferencesManager.DEFAULT_PORT
+                val isServerRunning = checkServerRunning("127.0.0.1", port)
+                if (!isActive) return@launch
+                runOnUiThread {
+                    // Final check before updating UI
+                    if (isConnected || !checklistRequested) return@runOnUiThread
+
+                    updateChecklistItem(binding.checkMacServer, isServerRunning)
+                    // A live tunnel proves cable + adb in one shot; charge-managed
+                    // tablets would otherwise flap "not connected" mid-session.
+                    updateChecklistItem(binding.checkUsbConnected, isUsbConnected || isServerRunning)
+
+                    // Update main status indicator based on all checklist items
+                    val allReady =
+                        isDeveloperModeEnabled && isAdbEnabled && isServerRunning &&
+                            (isUsbConnected || isServerRunning)
+                    updateMainStatus(allReady)
+                }
             }
-
-            val port =
-                binding.portInput.text
-                    .toString()
-                    .toIntOrNull() ?: 54321
-            val isServerRunning = checkServerRunning("127.0.0.1", port)
-            runOnUiThread {
-                // Final check before updating UI
-                if (isConnected) return@runOnUiThread
-
-                updateChecklistItem(binding.checkMacServer, isServerRunning)
-                // A live tunnel proves cable + adb in one shot; charge-managed
-                // tablets would otherwise flap "not connected" mid-session.
-                updateChecklistItem(binding.checkUsbConnected, isUsbConnected || isServerRunning)
-
-                // Update main status indicator based on all checklist items
-                val allReady =
-                    isDeveloperModeEnabled && isAdbEnabled && isServerRunning &&
-                        (isUsbConnected || isServerRunning)
-                updateMainStatus(allReady)
-            }
-        }
     }
 
     private fun updateMainStatus(allReady: Boolean) {

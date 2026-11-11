@@ -60,9 +60,33 @@ object CodecCapabilities {
         }
     }
 
-    /** Mime the client will ask the Mac to stream: HEVC when usable, else AVC. */
-    val streamMime: String
-        get() = if (hasHevcDecoder) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
+    /**
+     * How much larger (by area) the H.264 picture must be before it is worth its higher bitrate.
+     * Below this the two codecs are treated as equivalent and HEVC keeps its bandwidth edge.
+     */
+    private const val AVC_PREFERENCE_AREA_GAIN = 1.2
+
+    /**
+     * Mime the client will ask the Mac to stream for a panel of [panelWidth]x[panelHeight]:
+     * HEVC unless the device has no usable HEVC decoder, or its H.264 decoder sustains a
+     * noticeably larger picture at [REFERENCE_FPS]. Budget tablets commonly pair a Level 4 HEVC
+     * decoder (about 1080p30) with a far higher H.264 one; streaming HEVC there means a blurry
+     * upscale of a quarter-size picture (issue #78). A non-positive panel size falls back to
+     * decoder availability alone.
+     */
+    fun preferredStreamMime(
+        panelWidth: Int,
+        panelHeight: Int,
+    ): String {
+        if (!hasHevcDecoder) return MediaFormat.MIMETYPE_VIDEO_AVC
+        val hevc = maxStreamSize(MediaFormat.MIMETYPE_VIDEO_HEVC, panelWidth, panelHeight, REFERENCE_FPS)
+        val avc = maxStreamSize(MediaFormat.MIMETYPE_VIDEO_AVC, panelWidth, panelHeight, REFERENCE_FPS)
+        if (hevc == null || avc == null) return MediaFormat.MIMETYPE_VIDEO_HEVC
+        val gain = area(avc) / area(hevc)
+        return if (gain >= AVC_PREFERENCE_AREA_GAIN) MediaFormat.MIMETYPE_VIDEO_AVC else MediaFormat.MIMETYPE_VIDEO_HEVC
+    }
+
+    private fun area(size: Pair<Int, Int>): Double = size.first.toDouble() * size.second.toDouble()
 
     private val nominalSizeCache = HashMap<String, Pair<Int, Int>?>()
 
@@ -84,8 +108,18 @@ object CodecCapabilities {
     private fun probeNominalSize(mime: String): Pair<Int, Int>? =
         bestVideoCapabilities(mime)?.let { it.supportedWidths.upper to it.supportedHeights.upper }
 
-    /** Video capabilities of the largest usable hardware decoder for [mime]. */
+    private val capsCache = HashMap<String, MediaCodecInfo.VideoCapabilities?>()
+
+    /**
+     * Video capabilities of the largest usable hardware decoder for [mime]. Cached: a connection
+     * now asks several times (per codec, per table rate) and MediaCodecList enumeration is slow.
+     */
     private fun bestVideoCapabilities(mime: String): MediaCodecInfo.VideoCapabilities? =
+        synchronized(capsCache) {
+            capsCache.getOrPut(mime.lowercase()) { enumerateBestVideoCapabilities(mime) }
+        }
+
+    private fun enumerateBestVideoCapabilities(mime: String): MediaCodecInfo.VideoCapabilities? =
         try {
             MediaCodecList(MediaCodecList.ALL_CODECS)
                 .codecInfos
@@ -114,14 +148,32 @@ object CodecCapabilities {
     const val REFERENCE_FPS = 60
 
     /**
+     * Frame rates the client measures [maxStreamSize] at for the type-14 limit table, in wire
+     * order. The Mac picks the entry at or above its own frame rate, so a 30 Hz stream gets the
+     * whole decode budget instead of the 60 Hz figure, and a 120 Hz stream gets a measured figure
+     * instead of a guess scaled from a limit that may only have been the panel size (issue #78).
+     * Must match CodecLimits.tableFps on the Mac.
+     */
+    val TABLE_FPS = intArrayOf(30, 60, 120)
+
+    /**
+     * [maxStreamSize] at every [TABLE_FPS] rate, in that order, or null when any rate cannot be
+     * measured (the Mac then falls back to the single [REFERENCE_FPS] limit).
+     */
+    fun streamLimitTable(
+        mime: String,
+        panelWidth: Int,
+        panelHeight: Int,
+    ): List<Pair<Int, Int>>? = TABLE_FPS.map { maxStreamSize(mime, panelWidth, panelHeight, it) ?: return null }
+
+    /**
      * The largest frame the Mac should ever encode for us: no larger than the panel can show, and
      * within what the decoder sustains at [fps]. Null when no usable decoder exists or the probe
      * fails, which leaves the legacy "advertise nothing" behavior in place.
      *
      * The panel is the upper bound because anything above it is downscaled on arrival anyway, so
      * spending decode budget there buys nothing. [MediaCodecInfo.VideoCapabilities.areSizeAndRateSupported]
-     * is the check that consults `blocks-per-second`, which [nominalMaxDecodeSize] misses. Shrinks
-     * stepwise rather than solving directly because the budget counts aligned macroblocks.
+     * is the check that consults `blocks-per-second`, which [nominalMaxDecodeSize] misses.
      */
     fun maxStreamSize(
         mime: String,
@@ -132,27 +184,75 @@ object CodecCapabilities {
         if (panelWidth <= 0 || panelHeight <= 0) return null
         val caps = bestVideoCapabilities(mime) ?: return null
         val rate = fps.coerceAtLeast(1).toDouble()
+        return try {
+            fitStreamSize(
+                panelWidth = panelWidth,
+                panelHeight = panelHeight,
+                maxWidth = caps.supportedWidths.upper,
+                maxHeight = caps.supportedHeights.upper,
+                widthAlignment = caps.widthAlignment,
+                heightAlignment = caps.heightAlignment,
+            ) { w, h ->
+                try {
+                    caps.areSizeAndRateSupported(w, h, rate)
+                } catch (_: IllegalArgumentException) {
+                    false
+                }
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
 
-        var w = panelWidth.coerceAtMost(caps.supportedWidths.upper)
-        var h = panelHeight.coerceAtMost(caps.supportedHeights.upper)
+    /**
+     * Largest size for a panel of [panelWidth]x[panelHeight] that [supports] accepts, or null.
+     *
+     * The native panel size comes first, aligned only to what the decoder itself requires
+     * ([widthAlignment]/[heightAlignment], usually 2). [supports] already counts macroblocks
+     * rounded up, so a panel side that is not a multiple of 16 (1800, 1080) needs no padding
+     * here. Flooring it to 16 instead made a 2880x1800 panel report 2880x1792, and the Mac then
+     * encoded 2864x1792 and the client upscaled it back. When the native size is over budget,
+     * shrinks stepwise on 16-aligned sizes, because the budget counts aligned macroblocks.
+     */
+    internal fun fitStreamSize(
+        panelWidth: Int,
+        panelHeight: Int,
+        maxWidth: Int,
+        maxHeight: Int,
+        widthAlignment: Int,
+        heightAlignment: Int,
+        supports: (width: Int, height: Int) -> Boolean,
+    ): Pair<Int, Int>? {
+        if (panelWidth <= maxWidth && panelHeight <= maxHeight) {
+            val nativeW = alignDown(panelWidth, widthAlignment)
+            val nativeH = alignDown(panelHeight, heightAlignment)
+            if (nativeW >= MIN_STREAM_SIDE && nativeH >= MIN_STREAM_SIDE && supports(nativeW, nativeH)) {
+                return nativeW to nativeH
+            }
+        }
+
+        var w = panelWidth.coerceAtMost(maxWidth)
+        var h = panelHeight.coerceAtMost(maxHeight)
         val aspect = panelWidth.toDouble() / panelHeight.toDouble()
 
         repeat(40) {
-            val alignedW = (w / BLOCK_ALIGN) * BLOCK_ALIGN
-            val alignedH = (h / BLOCK_ALIGN) * BLOCK_ALIGN
-            if (alignedW < 256 || alignedH < 256) return null
-            val supported =
-                try {
-                    caps.areSizeAndRateSupported(alignedW, alignedH, rate)
-                } catch (_: IllegalArgumentException) {
-                    false
-                } catch (_: Exception) {
-                    return null
-                }
-            if (supported) return alignedW to alignedH
+            val alignedW = alignDown(w, BLOCK_ALIGN)
+            val alignedH = alignDown(h, BLOCK_ALIGN)
+            if (alignedW < MIN_STREAM_SIDE || alignedH < MIN_STREAM_SIDE) return null
+            if (supports(alignedW, alignedH)) return alignedW to alignedH
             w = (w * 0.95).toInt()
             h = (w / aspect).toInt()
         }
         return null
+    }
+
+    private const val MIN_STREAM_SIDE = 256
+
+    private fun alignDown(
+        value: Int,
+        alignment: Int,
+    ): Int {
+        val a = alignment.coerceAtLeast(1)
+        return (value / a) * a
     }
 }

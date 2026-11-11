@@ -646,6 +646,20 @@ struct SettingsView: View {
                                         .labelsHidden()
                                 }
 
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Low latency at 120 Hz")
+                                            .font(.system(size: 12, weight: .medium))
+                                        Text("Above 60 Hz, send a smaller picture so each frame arrives sooner. Off: the full size your tablet can decode — sharpest, more input lag.")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                    Spacer()
+                                    Toggle("", isOn: $settings.lowLatencyStreamSize)
+                                        .labelsHidden()
+                                }
+
                                 if settings.gamingBoost {
                                     VStack(alignment: .leading, spacing: 6) {
                                         HStack(spacing: 4) {
@@ -693,23 +707,23 @@ struct SettingsView: View {
 
                                     VStack(spacing: 6) {
                                         HStack(spacing: 6) {
-                                            ForEach([100, 300, 500, 800, 1000, 1500], id: \.self) { value in
+                                            ForEach([100, 300, 500, 800, 1000], id: \.self) { value in
                                                 BitrateButton(label: "\(value)", value: value, currentValue: settings.bitrate, disabled: settings.gamingBoost) {
                                                     settings.bitrate = value
                                                 }
                                             }
                                         }
                                         HStack(spacing: 6) {
-                                            ForEach([2000, 2500, 3000, 4000, 5000], id: \.self) { value in
+                                            ForEach([1200, 1500, 1800, 2000], id: \.self) { value in
                                                 BitrateButton(label: "\(value)", value: value, currentValue: settings.bitrate, disabled: settings.gamingBoost) {
                                                     settings.bitrate = value
                                                 }
                                             }
-                                            // "Max" = slider/programmatic ceiling; the encoder
-                                            // clamps internally beyond what silicon sustains, so
-                                            // pinning here is honest rather than chasing the number.
-                                            BitrateButton(label: "Max", value: 5000, currentValue: settings.bitrate, disabled: settings.gamingBoost) {
-                                                settings.bitrate = 5000
+                                            // "Max" = the most VideoToolbox accepts (~2147 Mbps).
+                                            // Anything above is rejected or wraps, so the old
+                                            // 2500-5000 presets set a far lower bitrate (5000 became 705).
+                                            BitrateButton(label: "Max", value: DisplaySettings.maxBitrateMbps, currentValue: settings.bitrate, disabled: settings.gamingBoost) {
+                                                settings.bitrate = DisplaySettings.maxBitrateMbps
                                             }
                                         }
                                     }
@@ -721,9 +735,9 @@ struct SettingsView: View {
                                         Slider(value: Binding(
                                             get: { Double(settings.bitrate) },
                                             set: { settings.bitrate = Int($0) }
-                                        ), in: 20...5000, step: 10)
+                                        ), in: Double(DisplaySettings.minBitrateMbps)...Double(DisplaySettings.sliderMaxBitrateMbps), step: 10)
                                         .disabled(settings.gamingBoost)
-                                        Text("5000")
+                                        Text("\(DisplaySettings.sliderMaxBitrateMbps)")
                                             .font(.system(size: 9))
                                             .foregroundColor(.secondary)
                                     }
@@ -801,7 +815,16 @@ struct SettingsView: View {
                                     StatusRow(title: "ADB installed",
                                               status: settings.adbInstalled ? "Installed" : "Missing",
                                               color: settings.adbInstalled ? .green : .red,
-                                              hint: "USB mode tunnels the TCP stream through the cable using `adb reverse`. Requires the `adb` command on the Mac. Searched paths: Homebrew, /usr/local/bin, ~/Library/Android/sdk/platform-tools, and PATH (`which adb`).")
+                                              hint: "USB mode tunnels the TCP stream through the cable using `adb reverse`. Requires the `adb` command on the Mac. Searched: the ADB path below, $ANDROID_HOME, Homebrew, /usr/local/bin, ~/Library/Android/sdk/platform-tools, nix (/run/current-system/sw/bin, per-user and ~/.nix-profile), MacPorts, and your login shell's PATH.")
+                                    HStack(spacing: 6) {
+                                        Text("ADB path")
+                                            .font(.system(size: 11))
+                                            .foregroundColor(.secondary)
+                                        TextField("Auto-detect", text: $settings.adbPath)
+                                            .textFieldStyle(.roundedBorder)
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .help("Optional. Full path to adb, or to the folder containing it (e.g. an SDK's platform-tools). Leave empty to auto-detect.")
+                                    }
                                     if !settings.adbInstalled {
                                         Text("brew install android-platform-tools")
                                             .font(.system(size: 10, design: .monospaced))
@@ -818,7 +841,14 @@ struct SettingsView: View {
                                     StatusRow(title: "USB device",
                                               status: settings.usbDeviceConnected ? "Detected" : "Not detected",
                                               color: settings.usbDeviceConnected ? .green : .red,
-                                              hint: "An Android device authorized for ADB and visible to your Mac. Plug in via USB-C and tap Allow on the device's USB debugging prompt.")
+                                              hint: "An Android device authorized for ADB and visible to your Mac. Plug in via USB-C and tap Allow on the device's USB debugging prompt. Emulators and wireless-debugging connections are ignored.")
+                                    if let usbHint = settings.usbDeviceHint {
+                                        Text(usbHint)
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.orange)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .textSelection(.enabled)
+                                    }
                                 } else {
                                     StatusRow(title: "WiFi",
                                               status: settings.wifiConnected ? "Connected" : "Disconnected",
@@ -1274,6 +1304,11 @@ class DisplaySettings: ObservableObject {
     @Published var gamingBoost: Bool {
         didSet { save("gamingBoost", gamingBoost) }
     }
+    /// Above 60 Hz, stream at the 60 Hz size scaled to the rate (lower input
+    /// lag) instead of the largest size the tablet's decoder reports (sharpest).
+    @Published var lowLatencyStreamSize: Bool {
+        didSet { save("lowLatencyStreamSize", lowLatencyStreamSize) }
+    }
     @Published var port: UInt16 {
         didSet { save("port", Int(port)) }
     }
@@ -1294,6 +1329,11 @@ class DisplaySettings: ObservableObject {
     }
     @Published var customHeight: Int {
         didSet { save("customHeight", customHeight) }
+    }
+    /// Optional adb location for setups auto-detection misses (#91, #100).
+    /// Read by StatusDetector via ADBLocator.customPathKey.
+    @Published var adbPath: String {
+        didSet { save("adbPath", adbPath) }
     }
     @Published var touchEnabled: Bool {
         didSet { save("touchEnabled", touchEnabled) }
@@ -1336,6 +1376,8 @@ class DisplaySettings: ObservableObject {
     @Published var adbInstalled = false
     @Published var adbReverseConfigured = false
     @Published var usbDeviceConnected = false
+    /// Unauthorized / offline device guidance or an adb error, nil when fine.
+    @Published var usbDeviceHint: String?
     @Published var wifiConnected = false
     @Published var listeningAddress: String?
     @Published var isRunning = false
@@ -1354,6 +1396,7 @@ class DisplaySettings: ObservableObject {
         self.bitrate = 1000  // legacy placeholder; per-transport migration runs at the end
         self.quality = defaults.string(forKey: keyPrefix + "quality") ?? "ultralow"  // Default: fastest encoding
         self.gamingBoost = defaults.bool(forKey: keyPrefix + "gamingBoost")
+        self.lowLatencyStreamSize = defaults.object(forKey: keyPrefix + "lowLatencyStreamSize") as? Bool ?? true
         // Default port 54321 (was 8888 in <=0.7.1; 8888 collides with jupyter/splunk/HP printers).
         // Existing users keep their saved value.
         self.port = UInt16(defaults.object(forKey: keyPrefix + "port") as? Int ?? 54321)
@@ -1363,6 +1406,7 @@ class DisplaySettings: ObservableObject {
         self.showAllResolutions = defaults.bool(forKey: keyPrefix + "showAllResolutions")
         self.customWidth = defaults.object(forKey: keyPrefix + "customWidth") as? Int ?? 1920
         self.customHeight = defaults.object(forKey: keyPrefix + "customHeight") as? Int ?? 1200
+        self.adbPath = defaults.string(forKey: keyPrefix + "adbPath") ?? ""
         self.touchEnabled = defaults.object(forKey: keyPrefix + "touchEnabled") as? Bool ?? true
         // Default off: without it the touch pipeline keeps its original trackpad behaviour.
         self.penModeEnabled = defaults.object(forKey: keyPrefix + "penModeEnabled") as? Bool ?? false
@@ -1376,18 +1420,20 @@ class DisplaySettings: ObservableObject {
         // Legacy 1000 (the old default) → fresh conservative defaults; a custom
         // legacy value → kept on USB, capped for WiFi. Runs AFTER every stored
         // property is initialized (mirror reads connectionMode + usb/wifi).
+        // Stored values are clamped to the settings range: 0.12.1–0.12.7
+        // offered presets up to 5000 Mbps, which VideoToolbox cannot apply.
         let legacyBitrate = defaults.object(forKey: keyPrefix + "bitrate") as? Int
         if defaults.object(forKey: keyPrefix + "usbBitrateMbps") == nil {
             if let legacy = legacyBitrate, legacy != 1000 {
-                self.usbBitrateMbps = legacy
-                self.wifiBitrateMbps = min(legacy, 40)
+                self.usbBitrateMbps = Self.clampBitrateMbps(legacy)
+                self.wifiBitrateMbps = Self.clampBitrateMbps(min(legacy, 40))
             } else {
                 self.usbBitrateMbps = 80
                 self.wifiBitrateMbps = 30
             }
         } else {
-            self.usbBitrateMbps = defaults.object(forKey: keyPrefix + "usbBitrateMbps") as? Int ?? 80
-            self.wifiBitrateMbps = defaults.object(forKey: keyPrefix + "wifiBitrateMbps") as? Int ?? 30
+            self.usbBitrateMbps = Self.clampBitrateMbps(defaults.object(forKey: keyPrefix + "usbBitrateMbps") as? Int ?? 80)
+            self.wifiBitrateMbps = Self.clampBitrateMbps(defaults.object(forKey: keyPrefix + "wifiBitrateMbps") as? Int ?? 30)
         }
         self.bitrate = connectionMode == .usb ? usbBitrateMbps : wifiBitrateMbps
 
@@ -1398,11 +1444,70 @@ class DisplaySettings: ObservableObject {
         defaults.set(value, forKey: keyPrefix + key)
     }
 
+    /// The tablet-specific slice of the settings, plus the display position
+    /// VirtualDisplayManager last saved (same `SideScreen_` keys).
+    var profileSettings: ProfileSettings {
+        let hasPosition = defaults.bool(forKey: keyPrefix + "hasPosition")
+        return ProfileSettings(
+            resolution: resolution,
+            refreshRate: refreshRate,
+            hiDPI: hiDPI,
+            rotation: rotation,
+            flipHorizontal: flipHorizontal,
+            flipVertical: flipVertical,
+            usbBitrateMbps: usbBitrateMbps,
+            wifiBitrateMbps: wifiBitrateMbps,
+            quality: quality,
+            gamingBoost: gamingBoost,
+            touchEnabled: touchEnabled,
+            penModeEnabled: penModeEnabled,
+            positionX: hasPosition ? defaults.integer(forKey: keyPrefix + "positionX") : nil,
+            positionY: hasPosition ? defaults.integer(forKey: keyPrefix + "positionY") : nil
+        )
+    }
+
+    /// Make `profile` the current settings. Only changed values are assigned,
+    /// so observers fire just for what actually differs.
+    func apply(_ profile: ProfileSettings) {
+        if resolution != profile.resolution { resolution = profile.resolution }
+        if refreshRate != profile.refreshRate { refreshRate = profile.refreshRate }
+        if hiDPI != profile.hiDPI { hiDPI = profile.hiDPI }
+        if rotation != profile.rotation { rotation = profile.rotation }
+        if flipHorizontal != profile.flipHorizontal { flipHorizontal = profile.flipHorizontal }
+        if flipVertical != profile.flipVertical { flipVertical = profile.flipVertical }
+        let usb = Self.clampBitrateMbps(profile.usbBitrateMbps)
+        let wifi = Self.clampBitrateMbps(profile.wifiBitrateMbps)
+        if usbBitrateMbps != usb { usbBitrateMbps = usb }
+        if wifiBitrateMbps != wifi { wifiBitrateMbps = wifi }
+        if quality != profile.quality { quality = profile.quality }
+        if gamingBoost != profile.gamingBoost { gamingBoost = profile.gamingBoost }
+        if touchEnabled != profile.touchEnabled { touchEnabled = profile.touchEnabled }
+        if penModeEnabled != profile.penModeEnabled { penModeEnabled = profile.penModeEnabled }
+        if let x = profile.positionX, let y = profile.positionY {
+            save("positionX", x)
+            save("positionY", y)
+            save("hasPosition", true)
+        } else {
+            defaults.removeObject(forKey: keyPrefix + "hasPosition")
+        }
+    }
+
     struct ResolutionGroup: Identifiable {
         let id = UUID()
         let name: String
         let ratio: String
         let resolutions: [String]
+    }
+
+    /// Bitrate range offered by the settings UI, in Mbps. The ceiling ("Max")
+    /// is VideoEncoder.maxBitrateMbps (~2147, the most VideoToolbox accepts);
+    /// the slider stops at the round 2000 below it.
+    static let minBitrateMbps = 20
+    static let maxBitrateMbps = VideoEncoder.maxBitrateMbps
+    static let sliderMaxBitrateMbps = 2000
+
+    static func clampBitrateMbps(_ value: Int) -> Int {
+        min(max(value, minBitrateMbps), maxBitrateMbps)
     }
 
     static let resolutionGroups: [ResolutionGroup] = [

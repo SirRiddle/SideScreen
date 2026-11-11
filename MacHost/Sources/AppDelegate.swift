@@ -94,6 +94,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var settingsWindow: SettingsWindowController?
     var statusItem: NSStatusItem?
     let pairedDeviceStore = PairedDeviceStore()
+    let deviceProfileStore = DeviceProfileStore()
+    /// Profile key of the tablet currently streaming (nil when none, or when
+    /// it is an older USB app that does not identify itself).
+    private var activeProfileKey: String?
+    /// True while prepareProfile copies a profile into `settings` and rebuilds
+    /// the display: the observers that would restart the server or push a
+    /// display config early stand down, the switch does that work itself.
+    private var isSwitchingProfile = false
     /// Name of the wireless device currently streaming (nil when no wireless client is active).
     /// Used to roll its `lastConnected` timestamp forward every status refresh tick so the UI
     /// shows "just now" while connected and freezes at the disconnect moment afterward.
@@ -201,14 +209,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let port = Int(settings.port)
         Task.detached { [weak self] in
-            let devices = StatusDetector.usbDevices()
-            let reverseOK = StatusDetector.adbReverseConfigured(port: port)
+            let listing = StatusDetector.adbDeviceList()
+            let devices = listing.devices.filter(\.isReady).map(\.serial)
+            // Every attached device needs its own reverse (see setupADBReverse).
+            let reverseOK = !devices.isEmpty
+                && devices.allSatisfy { StatusDetector.adbReverseConfigured(port: port, serial: $0) }
+            // What to do about attached-but-unusable devices, or adb's own error (from PR #80).
+            let hint = listing.error.map { "adb: \($0)" }
+                ?? listing.devices.compactMap(\.connectionHint).first
             await MainActor.run { [weak self] in
                 guard let self = self else { return }
-                
+
                 let isConnected = !devices.isEmpty
 
                 self.settings.usbDeviceConnected = isConnected
+                self.settings.usbDeviceHint = hint
                 self.settings.adbReverseConfigured = reverseOK
 
                 // Self-healing USB bridge (level-triggered, not edge-triggered):
@@ -257,7 +272,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         settings.$gamingBoost
             .dropFirst() // Skip initial value
             .sink { [weak self] gamingBoost in
-                guard let self = self, self.settings.isRunning else { return }
+                // A profile switch rebuilds display + capture + encoder itself
+                // (Gaming Boost is part of ProfileSettings.displayShape); a full
+                // restart here would drop the tablet that is connecting.
+                guard let self = self, self.settings.isRunning, !self.isSwitchingProfile else { return }
                 debugLog("🎮 Gaming Boost \(gamingBoost ? "ENABLED" : "DISABLED") — full pipeline restart so display, capture, and encoder agree on the effective rate")
                 // Encoder-only rebuild lied about 120 Hz (the virtual display kept
                 // its original rate). Rebuild the whole chain; the client
@@ -268,6 +286,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     try? await Task.sleep(nanoseconds: 400_000_000)
                     await self.startServer()
                 }
+            }
+            .store(in: &cancellables)
+
+        // The stream size is chosen when a client negotiates; rebuild so the
+        // new size takes effect (the tablet reconnects on its own).
+        settings.$lowLatencyStreamSize
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] enabled in
+                guard let self = self, !self.isSwitchingProfile else { return }
+                self.restartRunningServer(reason: "Low latency at 120 Hz \(enabled ? "on" : "off")")
             }
             .store(in: &cancellables)
 
@@ -288,7 +317,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Publishers.CombineLatest3(settings.$rotation, settings.$flipHorizontal, settings.$flipVertical)
             .dropFirst()
             .sink { [weak self] rotation, flipHorizontal, flipVertical in
-                guard let self = self, self.settings.isRunning else { return }
+                // A profile switch sends the config itself, once the codec is known.
+                guard let self = self, self.settings.isRunning, !self.isSwitchingProfile else { return }
                 print("🔄 Display transform changed: \(rotation)°, h=\(flipHorizontal), v=\(flipVertical)")
                 self.streamingServer?.updateDisplayTransform(rotation: rotation, flipHorizontal: flipHorizontal, flipVertical: flipVertical)
             }
@@ -335,7 +365,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .dropFirst()
             .removeDuplicates()
             .sink { [weak self] resolution in
-                self?.restartRunningServer(reason: "Resolution changed to \(resolution)")
+                guard let self = self, !self.isSwitchingProfile else { return }
+                self.restartRunningServer(reason: "Resolution changed to \(resolution)")
             }
             .store(in: &cancellables)
 
@@ -356,6 +387,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     guard effective != self.lastAppliedRefreshRate else { return }
                     self.restartRunningServer(reason: "Refresh rate changed to \(effective) Hz")
                 }
+            }
+            .store(in: &cancellables)
+
+        // Every settings change lands in the profile it belongs to (see
+        // syncCurrentProfile). objectWillChange fires before the new value is
+        // stored; the debounce reads it after.
+        settings.objectWillChange
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.syncCurrentProfile()
             }
             .store(in: &cancellables)
     }
@@ -497,89 +538,69 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         debugLog("🔌 setupADBReverse() invoked for port \(port)...")
 
         await Task.detached(priority: .utility) {
-            // Try common adb paths
-            let adbPaths = [
-                "/usr/local/bin/adb",
-                "/opt/homebrew/bin/adb",
-                "~/Library/Android/sdk/platform-tools/adb",
-                "/Users/\(NSUserName())/Library/Android/sdk/platform-tools/adb"
-            ]
-
-            var adbPath: String?
-            for path in adbPaths {
-                let expandedPath = NSString(string: path).expandingTildeInPath
-                if FileManager.default.fileExists(atPath: expandedPath) {
-                    adbPath = expandedPath
-                    break
-                }
-            }
-
-            // Also try 'which adb' to find it in PATH
-            if adbPath == nil {
-                let whichProcess = Process()
-                whichProcess.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-                whichProcess.arguments = ["adb"]
-                let whichPipe = Pipe()
-                whichProcess.standardOutput = whichPipe
-                whichProcess.standardError = FileHandle.nullDevice
-
-                do {
-                    try whichProcess.run()
-                    whichProcess.waitUntilExit()
-                    let data = whichPipe.fileHandleForReading.readDataToEndOfFile()
-                    if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                       !path.isEmpty {
-                        adbPath = path
-                    }
-                } catch {
-                    // Ignore
-                }
-            }
-
-            guard let finalAdbPath = adbPath else {
+            guard let adbPath = StatusDetector.adbExecutablePath() else {
                 print("⚠️  ADB not found - USB connection may not work")
                 print("💡 Install Android SDK or run manually: adb reverse tcp:\(port) tcp:\(port)")
                 return
             }
+            print("📱 Found ADB at: \(adbPath)")
 
-            print("📱 Found ADB at: \(finalAdbPath)")
+            // One reverse per attached device: a bare `adb reverse` fails with
+            // "more than one device" as soon as a second tablet is plugged in.
+            // Devices still waiting for USB-debugging authorization are not
+            // listed yet; refreshStatusIndicators re-runs this once they are.
+            let serials = StatusDetector.usbDevices()
+            guard !serials.isEmpty else {
+                print("💡 No authorized Android device found — plug in via USB and allow debugging")
+                return
+            }
+            for serial in serials {
+                if StatusDetector.adbReverseConfigured(port: Int(port), serial: serial) {
+                    debugLog("ADB reverse already configured for \(serial)")
+                    continue
+                }
+                await Self.reverseWithRetry(adbPath: adbPath, serial: serial, port: port)
+            }
+        }.value
+    }
 
-            // Retry adb reverse up to 3 times — handles first-install authorization delay
-            for attempt in 1...3 {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: finalAdbPath)
-                process.arguments = ["reverse", "tcp:\(port)", "tcp:\(port)"]
+    /// `adb -s <serial> reverse tcp:P tcp:P`, retried up to 3 times — handles
+    /// the first-install authorization delay.
+    private static func reverseWithRetry(adbPath: String, serial: String, port: UInt16) async {
+        for attempt in 1...3 {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: adbPath)
+            process.arguments = ["-s", serial, "reverse", "tcp:\(port)", "tcp:\(port)"]
 
-                let pipe = Pipe()
-                process.standardOutput = pipe
-                process.standardError = pipe
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
 
-                do {
-                    try process.run()
-                    process.waitUntilExit()
+            do {
+                try process.run()
+                process.waitUntilExit()
 
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let output = String(data: data, encoding: .utf8) ?? ""
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: data, encoding: .utf8) ?? ""
 
-                    if process.terminationStatus == 0 {
-                        print("✅ ADB reverse setup successful: tcp:\(port) -> tcp:\(port)")
-                        return
-                    } else {
-                        print("⚠️  ADB reverse attempt \(attempt)/3 failed: \(output.trimmingCharacters(in: .whitespacesAndNewlines))")
-                        if attempt < 3 {
-                            try? await Task.sleep(nanoseconds: 1_000_000_000)
-                        }
-                    }
-                } catch {
-                    print("⚠️  Failed to run ADB (attempt \(attempt)/3): \(error.localizedDescription)")
+                if process.terminationStatus == 0 {
+                    print("✅ ADB reverse setup successful for \(serial): tcp:\(port) -> tcp:\(port)")
+                    return
+                } else {
+                    print("⚠️  ADB reverse attempt \(attempt)/3 failed for \(serial): \(output.trimmingCharacters(in: .whitespacesAndNewlines))")
                     if attempt < 3 {
                         try? await Task.sleep(nanoseconds: 1_000_000_000)
                     }
                 }
+            } catch {
+                print("⚠️  Failed to run ADB (attempt \(attempt)/3): \(error.localizedDescription)")
+                if attempt < 3 {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
             }
+        }
 
-            print("💡 Make sure Android device is connected via USB with debugging enabled")
-        }.value
+        print("💡 Make sure Android device \(serial) is connected via USB with debugging enabled")
     }
 
     @MainActor
@@ -627,22 +648,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             // Create virtual display and run ADB setup in parallel
-            virtualDisplayManager = VirtualDisplayManager()
-            let size = settings.resolutionSize
-            try virtualDisplayManager?.createDisplay(
-                width: size.width,
-                height: size.height,
-                refreshRate: settings.effectiveRefreshRate,
-                hiDPI: settings.hiDPI,
-                name: "SideScreen"
-            )
-
-            // Disable mirror mode (may fail if already in extend mode)
-            do {
-                try virtualDisplayManager?.disableMirrorMode()
-            } catch {
-                // Not critical - continue anyway
-            }
+            let manager = VirtualDisplayManager()
+            virtualDisplayManager = manager
+            try createVirtualDisplay(on: manager)
 
             await MainActor.run {
                 settings.displayCreated = true
@@ -659,34 +667,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 group.addTask { try? await Task.sleep(nanoseconds: 500_000_000) }
             }
 
-            virtualDisplayManager?.restoreDisplayPosition()
-
-            // Verify display is registered in the system
-            if let vdm = virtualDisplayManager {
-                let registered = vdm.verifyDisplayRegistered()
-                if !registered {
-                    debugLog("WARNING: Virtual display not found in online display list — capture may fail")
-                }
-            }
-
-            // Setup capture
-            guard let displayID = virtualDisplayManager?.displayID else {
-                throw NSError(
-                    domain: "SideScreen.Startup",
-                    code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "The virtual display was created without a display ID."]
-                )
-            }
-            screenCapture = try await ScreenCapture()
-            screenCapture?.onCaptureMethodChanged = { [weak self] method in
-                guard let self = self else { return }
-                debugLog("Capture method: \(method)")
-                Task { @MainActor in
-                    self.settings.captureMethod = method
-                }
-            }
-            lastAppliedRefreshRate = settings.effectiveRefreshRate
-            try await screenCapture?.setupForVirtualDisplay(displayID, refreshRate: settings.effectiveRefreshRate)
+            manager.restoreDisplayPosition()
+            screenCapture = try await makeCapture(for: manager)
 
             // Setup server
             streamingServer = StreamingServer(port: settings.port)
@@ -703,13 +685,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
             }
-            // displayConfig carries the ENCODED size, always. The client sizes and
-            // selects its decoder from it, so a friendlier number here makes it
-            // check capabilities against a resolution it will never receive. The
-            // logical desktop travels separately, for display only.
-            let initialEncode = ScreenCapture.physicalSize(for: displayID)
-            streamingServer?.setDesktopSize(width: size.width, height: size.height)
-            streamingServer?.setDisplaySize(width: initialEncode.width, height: initialEncode.height, rotation: settings.rotation, flipHorizontal: settings.flipHorizontal, flipVertical: settings.flipVertical)
+            configureDisplayGeometry(on: streamingServer, for: manager)
+            streamingServer?.onPrepareForClient = { [weak self] key, name in
+                guard let self = self, let key = key else { return true }
+                Task { @MainActor in await self.prepareProfile(key: key, name: name) }
+                return false
+            }
             streamingServer?.onClientConnected = { [weak self] in
                 guard let self = self else { return }
                 self.screenCapture?.resumeCapture()
@@ -722,12 +703,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // dimensions for the negotiated codec.
             streamingServer?.onCodecNegotiated = { [weak self] codec in
                 guard let self = self, let capture = self.screenCapture else { return }
-                capture.negotiate(codec: codec, clientLimit: self.streamingServer?.clientDecodeLimits)
+                capture.negotiate(
+                    codec: codec,
+                    clientLimit: self.streamingServer?.clientDecodeLimits,
+                    clientLimitTable: self.streamingServer?.clientDecodeLimitTable
+                )
                 let enc = capture.encodeSize(for: codec)
                 // Whatever the codec negotiation settled on, this is what the
                 // stream's SPS will carry, so it is what the client must size
                 // its decoder for.
-                self.streamingServer?.setDesktopSize(width: size.width, height: size.height)
+                let desktop = self.settings.resolutionSize
+                self.streamingServer?.setDesktopSize(width: desktop.width, height: desktop.height)
                 self.streamingServer?.setDisplaySize(width: enc.width, height: enc.height, rotation: self.settings.rotation, flipHorizontal: self.settings.flipHorizontal, flipVertical: self.settings.flipVertical)
             }
             streamingServer?.onKeyframeRequested = { [weak self] force in
@@ -751,6 +737,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self.settings.currentFPS = 0
                     self.settings.currentBitrate = 0
                     self.settings.currentFrameAgeMs = 0
+                    self.closeActiveProfile()
                     // Final lastConnected snapshot at the disconnect moment, then
                     // freeze (currentWirelessDevice = nil stops the rolling update
                     // in refreshStatusIndicators).
@@ -783,14 +770,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 )
             }
             try await server.start()
-            screenCapture?.startStreaming(
-                to: server,
-                bitrateMbps: settings.effectiveBitrate,
-                quality: settings.effectiveQuality,
-                gamingBoost: settings.gamingBoost,
-                frameRate: settings.effectiveRefreshRate,
-                bitrateFloorMbps: settings.connectionMode == .usb ? 60 : 20
-            )
+            startStreaming(to: server)
 
             // No client yet — pause encoding immediately so the server starts
             // in an idle state and only resumes when a tablet connects.
@@ -813,6 +793,165 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 alert.runModal()
             }
         }
+    }
+
+    /// Create the virtual display from the current settings, in extend mode.
+    private func createVirtualDisplay(on manager: VirtualDisplayManager) throws {
+        let size = settings.resolutionSize
+        try manager.createDisplay(
+            width: size.width,
+            height: size.height,
+            refreshRate: settings.effectiveRefreshRate,
+            hiDPI: settings.hiDPI,
+            name: "SideScreen"
+        )
+
+        // Disable mirror mode (may fail if already in extend mode)
+        do {
+            try manager.disableMirrorMode()
+        } catch {
+            // Not critical - continue anyway
+        }
+    }
+
+    /// Capture for `manager`'s display, already positioned.
+    private func makeCapture(for manager: VirtualDisplayManager) async throws -> ScreenCapture {
+        // Verify display is registered in the system
+        if !manager.verifyDisplayRegistered() {
+            debugLog("WARNING: Virtual display not found in online display list — capture may fail")
+        }
+
+        guard let displayID = manager.displayID else {
+            throw NSError(
+                domain: "SideScreen.Startup",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "The virtual display was created without a display ID."]
+            )
+        }
+        let capture = try await ScreenCapture()
+        capture.preferLowLatencySize = settings.lowLatencyStreamSize
+        capture.onCaptureMethodChanged = { [weak self] method in
+            guard let self = self else { return }
+            debugLog("Capture method: \(method)")
+            Task { @MainActor in
+                self.settings.captureMethod = method
+            }
+        }
+        lastAppliedRefreshRate = settings.effectiveRefreshRate
+        try await capture.setupForVirtualDisplay(displayID, refreshRate: settings.effectiveRefreshRate)
+        return capture
+    }
+
+    private func configureDisplayGeometry(on server: StreamingServer?, for manager: VirtualDisplayManager) {
+        guard let displayID = manager.displayID else { return }
+        // displayConfig carries the ENCODED size, always. The client sizes and
+        // selects its decoder from it, so a friendlier number here makes it
+        // check capabilities against a resolution it will never receive. The
+        // logical desktop travels separately, for display only.
+        let size = settings.resolutionSize
+        let initialEncode = ScreenCapture.physicalSize(for: displayID)
+        server?.setDesktopSize(width: size.width, height: size.height)
+        server?.setDisplaySize(width: initialEncode.width, height: initialEncode.height, rotation: settings.rotation, flipHorizontal: settings.flipHorizontal, flipVertical: settings.flipVertical)
+    }
+
+    private func startStreaming(to server: StreamingServer) {
+        screenCapture?.startStreaming(
+            to: server,
+            bitrateMbps: settings.effectiveBitrate,
+            quality: settings.effectiveQuality,
+            gamingBoost: settings.gamingBoost,
+            frameRate: settings.effectiveRefreshRate,
+            bitrateFloorMbps: settings.connectionMode == .usb ? 60 : 20
+        )
+    }
+
+    // MARK: - Per-tablet profiles
+
+    /// A tablet identified itself and its stream is held until this returns
+    /// it to the server. Its profile is applied first: nothing to do when it
+    /// matches what is running, the display just moves when only the position
+    /// differs, and the display and capture are rebuilt — with the client
+    /// still connected — when anything that shapes them differs. A tablet
+    /// without a profile starts from the current settings, i.e. the last
+    /// profile used.
+    @MainActor
+    private func prepareProfile(key: String, name: String) async {
+        guard let server = streamingServer else { return }
+        defer { server.resumeProtocolStartup() }
+
+        // Flush whatever the current settings belong to (the last tablet, or
+        // one that never disconnected cleanly) before they are replaced.
+        virtualDisplayManager?.saveDisplayPosition()
+        syncCurrentProfile()
+
+        let current = settings.profileSettings
+        let stored = deviceProfileStore.profile(id: key)
+        let displayName = name.isEmpty ? (stored?.name ?? "Tablet") : name
+        activeProfileKey = key
+        deviceProfileStore.save(DeviceProfile(id: key, name: displayName, lastConnected: Date(), settings: stored?.settings ?? current))
+
+        guard let target = stored?.settings, target != current else {
+            debugLog("Profile \(displayName): \(stored == nil ? "new tablet, starting from the last profile" : "matches, nothing to apply")")
+            return
+        }
+
+        isSwitchingProfile = true
+        defer { isSwitchingProfile = false }
+        settings.apply(target)
+
+        if target.displayShape != current.displayShape {
+            debugLog("Profile \(displayName): rebuilding display for \(target.resolution) @ \(target.refreshRate)Hz")
+            lastAppliedRefreshRate = settings.effectiveRefreshRate
+            do {
+                try await rebuildDisplay(for: server)
+            } catch {
+                debugLog("❌ Profile switch failed: \(error) — stopping server")
+                stopServer()
+            }
+        } else {
+            debugLog("Profile \(displayName): applied live")
+            if target.positionX != current.positionX || target.positionY != current.positionY {
+                virtualDisplayManager?.restoreDisplayPosition()
+            }
+        }
+    }
+
+    /// Swap the virtual display and capture for ones built from the current
+    /// settings while `server` and its client stay up.
+    @MainActor
+    private func rebuildDisplay(for server: StreamingServer) async throws {
+        guard let manager = virtualDisplayManager else { return }
+        screenCapture?.stopStreaming()
+        screenCapture = nil
+
+        try createVirtualDisplay(on: manager)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        manager.restoreDisplayPosition()
+        let capture = try await makeCapture(for: manager)
+        guard streamingServer === server else { return }
+        screenCapture = capture
+        configureDisplayGeometry(on: server, for: manager)
+        startStreaming(to: server)
+    }
+
+    /// The streaming tablet went away: keep where its display ended up and
+    /// what it was set to, then stop tracking it.
+    private func closeActiveProfile() {
+        guard activeProfileKey != nil else { return }
+        // Mid-switch the display is a fresh one not yet moved into place.
+        if !isSwitchingProfile {
+            virtualDisplayManager?.saveDisplayPosition()
+        }
+        syncCurrentProfile()
+        activeProfileKey = nil
+    }
+
+    /// Copy the current settings into the profile they belong to: the
+    /// streaming tablet, or — while none is — the one used last, so a change
+    /// made between sessions is not undone when that tablet comes back.
+    private func syncCurrentProfile() {
+        guard let key = activeProfileKey ?? deviceProfileStore.mostRecent()?.id else { return }
+        deviceProfileStore.updateSettings(settings.profileSettings, for: key)
     }
 
     /// Code pairing (issue #35): issue a fresh one-time code for this wireless
@@ -877,6 +1016,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // preserved through the #57 teardown refactor).
         cancelActiveRemoteGesture()
         tearDownServerResources(saveDisplayPosition: true)
+        syncCurrentProfile()
+        activeProfileKey = nil
 
         print("⏹️ Server stopped")
     }
@@ -1093,37 +1234,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let deltaY = point.y - touchLastPosition.y
         let totalDistance = hypot(point.x - touchStartPosition.x, point.y - touchStartPosition.y)
 
-        switch gestureState {
-        case .pending:
-            if totalDistance > GestureThresholds.tapMaxDistance {
-                cancelLongPressTimer()
-                // 1-finger move = scroll (upstream behavior). Slow deliberate
-                // drags still work via long-press-then-drag from .longPressReady.
-                // Cursor follows in .pending up to this point (unlike upstream).
-                gestureState = .scrolling
-                let sx = deltaX * GestureThresholds.scrollSensitivity
-                let sy = deltaY * GestureThresholds.scrollSensitivity
-                injectScrollEvent(deltaX: sx, deltaY: sy, at: point)
-                lastScrollDeltaX = sx
-                lastScrollDeltaY = sy
-            } else {
-                // Cursor follows the finger so positioning feels immediate
-                // instead of freezing at the down point while we wait to
-                // decide if this is a tap or a drag/scroll.
-                moveCursor(to: point)
-            }
+        // Decisions live in OneFingerGestureRules (unit-tested); this applies them.
+        switch OneFingerGestureRules.onMove(state: gestureState, distanceFromStart: totalDistance) {
+        case .startScroll:
+            cancelLongPressTimer()
+            // 1-finger move = scroll (upstream behavior). Slow deliberate
+            // drags still work via long-press-then-drag from .longPressReady.
+            // Cursor follows in .pending up to this point (unlike upstream).
+            gestureState = .scrolling
+            let sx = deltaX * GestureThresholds.scrollSensitivity
+            let sy = deltaY * GestureThresholds.scrollSensitivity
+            injectScrollEvent(deltaX: sx, deltaY: sy, at: point)
+            lastScrollDeltaX = sx
+            lastScrollDeltaY = sy
 
-        case .longPressReady:
-            if totalDistance > GestureThresholds.tapMaxDistance {
-                // Long press + drag is still a synthetic left-mouse drag;
-                // .longPressReady can only be reached by holding without
-                // matching the threshold, so the drag starts here.
-                gestureState = .dragging
-                injectMouseDown(at: touchStartPosition)
-                injectMouseDragged(to: point)
-            }
+        case .followCursor:
+            // Cursor follows the finger so positioning feels immediate
+            // instead of freezing at the down point while we wait to
+            // decide if this is a tap or a drag/scroll.
+            moveCursor(to: point)
 
-        case .scrolling:
+        case .startDrag:
+            // Long press + drag is still a synthetic left-mouse drag;
+            // .longPressReady can only be reached by holding without
+            // matching the threshold, so the drag starts here.
+            gestureState = .dragging
+            injectMouseDown(at: touchStartPosition)
+            injectMouseDragged(to: point)
+
+        case .scroll:
             let sx = deltaX * GestureThresholds.scrollSensitivity
             let sy = deltaY * GestureThresholds.scrollSensitivity
             injectScrollEvent(deltaX: sx, deltaY: sy, at: point)
@@ -1132,10 +1271,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 lastScrollDeltaX = sx
                 lastScrollDeltaY = sy
             }
-        case .dragging, .penDrawing:
+
+        case .drag:
             injectMouseDragged(to: point)
 
-        default:
+        case .ignore:
             break
         }
 
@@ -1148,54 +1288,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let now = DispatchTime.now().uptimeNanoseconds
         let distance = hypot(point.x - touchStartPosition.x, point.y - touchStartPosition.y)
 
-        switch gestureState {
-        case .pending:
-            // Lift before the long-press timer fired → tap (or double tap).
-            // The timer (longPressTime, 600ms) is the sole cutoff: if it
-            // already fired the state is .longPressReady, not .pending.
-            // Removing the old `elapsed < tapMaxTime (250ms)` gate fixes
-            // the 250–600ms dead zone where a deliberate press produced
-            // NO click at all — buttons that "didn't respond."
-            if distance < GestureThresholds.tapMaxDistance {
-                // Check double tap
-                let timeSinceLastTap = now - lastTapTime
-                let distFromLastTap = hypot(point.x - lastTapPosition.x, point.y - lastTapPosition.y)
-
-                if timeSinceLastTap < GestureThresholds.doubleTapMaxTime
-                    && distFromLastTap < GestureThresholds.doubleTapMaxDistance {
-                    performDoubleClick(at: point)
-                    lastTapTime = 0  // Reset so triple tap doesn't trigger
-                } else {
-                    performClick(at: point)
-                    lastTapTime = now
-                    lastTapPosition = point
-                }
-            }
-
-        case .longPressReady:
-            // Held long but didn't drag → right click
+        // Lift before the long-press timer fired → tap (or double tap); the
+        // timer (600 ms) is the sole cutoff, so there is no 250–600 ms dead
+        // zone. Held without moving → right click. Fast flick → momentum.
+        // Decisions in OneFingerGestureRules (unit-tested).
+        let decision = OneFingerGestureRules.onUp(
+            state: gestureState,
+            lift: OneFingerGestureRules.Lift(
+                distanceFromStart: distance,
+                sinceLastTapNs: lastTapTime == 0 ? nil : now - lastTapTime,
+                distanceFromLastTap: hypot(point.x - lastTapPosition.x, point.y - lastTapPosition.y),
+                sinceLastMoveNs: now - touchLastMoveTime,
+                lastScrollDeltaX: lastScrollDeltaX,
+                lastScrollDeltaY: lastScrollDeltaY
+            )
+        )
+        switch decision {
+        case .click:
+            performClick(at: point)
+            lastTapTime = now
+            lastTapPosition = point
+        case .doubleClick:
+            performDoubleClick(at: point)
+            lastTapTime = 0  // Reset so triple tap doesn't trigger
+        case .rightClick:
             performRightClick(at: point)
-
-        case .scrolling:
-            // A lift from a fast-flick scroll starts momentum; the user wants
-            // the page to keep coasting after the finger leaves.
-            let timeSinceLastMove = now - touchLastMoveTime
-            if timeSinceLastMove < 50_000_000 {
-                let threshold: CGFloat = 2.0
-                if abs(lastScrollDeltaX) > threshold || abs(lastScrollDeltaY) > threshold {
-                    startMomentumScroll(
-                        velocityX: lastScrollDeltaX * 6.0,
-                        velocityY: lastScrollDeltaY * 6.0,
-                        at: point
-                    )
-                }
-            }
-
-        case .dragging, .penDrawing:
+        case let .momentum(velocityX, velocityY):
+            startMomentumScroll(velocityX: velocityX, velocityY: velocityY, at: point)
+        case .releaseDrag:
             // .penDrawing only lands here if the mode was switched off mid-stroke.
             injectMouseUp(at: point)
-
-        default:
+        case .nothing:
             break
         }
 

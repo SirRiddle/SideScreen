@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+<a id="1.2.0"></a>
+## [1.2.0] - 2026-11-11
+
+Synced with upstream 1.1.1 (everything except Play Store, demo mode and website changes), plus fork fixes for bugs still open upstream.
+
+### Added
+- **Mac: automatic updates** (Sparkle, from upstream #107, on this fork's own feed and signing key). Side Screen checks once a day and asks before downloading; "Check for Updates…" is in the app menu. This is the first version with the updater: install 1.2.0 by hand once, later versions arrive on their own.
+- **Mac: stable code signature.** Builds are signed with the fork's own certificate instead of ad-hoc, so macOS keeps the Screen Recording and Accessibility permissions across updates (the #77 "Status stays red after updating" problem). See *Upgrading* below for the one-time re-grant.
+- **Mac: ADB path setting** (#100), and adb is now also found in nix-darwin, home-manager and nix profiles, `$ANDROID_HOME`, MacPorts and your login shell's PATH (#91).
+- **Android: "Use default port (54321)"** link under the port field.
+- **Per-tablet settings** (upstream #92). The Mac remembers each tablet's settings — resolution, refresh rate, HiDPI, rotation and flip, USB and WiFi bitrate, quality, Gaming Boost, touch, Pen / Draw mode — and where its display sits in the arrangement, and brings them back when that tablet connects again. The virtual display is rebuilt for the incoming tablet while it connects; a tablet seen for the first time starts from the current settings. The 20 most recently used tablets are kept. Needs the updated Android app: it sends a random per-install ID (new client→server wire type 18, not a hardware serial) before the handshake finishes, and now reports the device name you see in Android settings instead of the model code. Older apps behave as before; older wireless apps are told apart by device name.
+- Android: app logo on the idle connect screen (upstream #106).
+
+### Changed
+- Android: built for Android 16 (`targetSdk`/`compileSdk` 36, AGP 8.9.1, Gradle 8.13), and release builds are shrunk with R8 (24 MB instead of 29 MB).
+- Android: the wireless pairing token and the new per-install device ID are excluded from cloud backups and device-to-device transfer (#89).
+- **Mac: "Low latency at 120 Hz"** (Gaming Boost section, on by default). Upstream #78/#88 lets the Mac stream the full size a tablet's decoder reports even at 120 Hz; on a 3392×2400 tablet that is 3024×1964 per frame instead of 2384×1536, which raised frame age from ~25 to ~35 ms and lowered the delivered frame rate. With the setting on (the 0.12.x sizing) the refresh rate stays 120 Hz and each frame is smaller; turn it off for the sharpest picture.
+- Mac: bitrate presets are now 100–2000 Mbps plus **Max** (2147 Mbps, the most macOS's encoder accepts).
+- Android: CameraX 1.3.1 → 1.4.2 and ML Kit barcode scanning 17.2.0 → 17.3.0. Their native libraries are aligned for 16 KB memory pages, which newer Android 15+ devices use; the old ones were 4 KB-aligned.
+
+### Fixed
+- **Mac: USB mode with more than one Android device attached.** A bare `adb reverse` refuses to run when several devices are connected, so nothing could connect. The tunnel is now set up and checked for each authorized device (upstream #101 / #102).
+- **Android: crash after a failed connection.** Rotating the tablet or leaving the app while it was still connecting could crash it when the error dialog tried to show on the destroyed screen (upstream #103).
+- **Android: crash when dragging the status overlay on narrow screens** such as phones in portrait (upstream #113).
+- **Building with newer Swift toolchains.** `Package.swift` passes absolute module-map paths, so `swift build` no longer fails with "module map file not found" when the compiler runs outside the package directory; `install.sh` keeps an existing `JAVA_HOME` (upstream #81).
+- **Native resolution on panels whose sides aren't multiples of 16.** A 2880×1800 tablet was streamed at 2864×1792 and upscaled back, and a 2340×1080 phone at 2336×1072, so text was slightly soft. The stream now uses the exact panel size whenever the decoder can sustain it. Both the Android and the Mac app need updating for HiDPI captures.
+- **Mac: changing the bitrate while streaming froze the app.** Each step of the slider rebuilt the video encoder on the main thread while frames were still being encoded, which hung macOS's encoder service and with it Side Screen. Bitrate changes now apply to the running encoder without a rebuild, slider bursts collapse into the latest value, and the window stays responsive.
+- **Mac: bitrates above 2147 Mbps were ignored or wrapped.** The encoder takes a 32-bit value, so 2148–4294 Mbps were rejected and the encoder kept its previous bitrate, and anything higher wrapped around (5000 Mbps became 705 Mbps). The encoder now caps at 2147 Mbps. In settings, the 2500/3000/4000/5000 presets are replaced by 1200–2000 and a **Max** button that sets 2147 Mbps, the highest the encoder accepts; saved values above that load as Max.
+- **Android: crash when the Mac changed resolution mid-session.** On some tablets (seen on a Redmi Pad, Android 15) the decoder threw while restarting at the new size and the app closed. It now rebuilds the decoder, or shows a "disconnect and reconnect" message if that fails too (upstream #98; the Play review prompt from that change is not ported).
+- **Any new connection dropped the streaming tablet** (#69). A network scan, a rejected token, a second tablet pairing by code, or the tablet's own USB checklist probe cut off the live stream before the newcomer was even checked. Newcomers are now admitted first and only then take over.
+- **Android: the USB checklist kept probing the Mac from the background** (#70), every 2 s, flapping the Mac's "client connected" state, and a probe landing right after Connect could drop the new session. It now runs only while the app is on screen and never during a connect.
+- **Android: a dead WiFi link showed a frozen picture with a green "Connected" for 15+ minutes** (#72). The app now notices within about 10 seconds and reconnects.
+- **Android: tablets paired by code with the camera permission denied** opened on the camera-permission screen every launch instead of their saved pairing (#73).
+- **Android: custom port forgotten on every launch** (#117, #118).
+- **Mac: the Side Screen display lost its wallpaper (and arrangement) on every resolution change** (#108). The virtual display's identity no longer depends on the exact resolution, only on orientation and HiDPI, so macOS recognises it as the same display. The first launch of 1.2.0 counts as a new display once.
+- **Android: one log line written to storage for every frame** while the app was in the background (#74).
+- **Blurry picture on tablets whose stream was shrunk well below the panel** (upstream #78 / #88). The tablet now reports the size its decoder sustains at 30, 60 and 120 fps separately (new client→server wire type 14, sent after the old single figure, type 11), and the Mac uses the entry for the rate it streams at instead of scaling the 60 fps figure. At 30/60 Hz that is always on; at 120 Hz only with **Low latency at 120 Hz** turned off (it is on by default and keeps the scaled, lower-latency size — e.g. 1968×1280 instead of the full 2800×1840 on a MatePad Air). Tablets whose HEVC decoder sustains less than H.264 now ask for H.264. Needs both apps updated; either works with the older version of the other.
+
+### Upgrading
+- **Mac:** because the signature changes from ad-hoc to the fork's certificate, macOS asks for Screen Recording and Accessibility again the first time you run 1.2.0. If the Status row stays red, run `tccutil reset ScreenCapture com.sidescreen.app` and `tccutil reset Accessibility com.sidescreen.app`, then grant again. The DMG is not notarized: after copying the app to Applications, run `xattr -cr /Applications/SideScreen.app` once. Updates after 1.2.0 keep the permissions and install through the app.
+- **Android:** release APKs are now signed with the fork's own release key (they used a new random key on every CI run, so every update needed an uninstall). Uninstall the old app once before installing 1.2.0 (wireless users re-pair once); later releases update in place.
+- **Both apps** work with older versions of the other; per-tablet settings, the decoder-limit table and dead-link detection need both updated.
+
 ### Planned
 - mDNS auto-discovery for wireless mode
 - Multi-touch gestures

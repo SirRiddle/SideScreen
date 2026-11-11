@@ -79,3 +79,14 @@ Hard invariants (golden-byte tests in `HandshakeCodecTests.swift` / `AuthHandsha
 - SCStream dies with error -3815 on display sleep — wake observers + CGDisplayStream fallback (`ScreenCapture.swift`) handle it; don't remove.
 - `VirtualDisplayManager.productID` is the display identity (→ macOS display UUID, which keys wallpaper, arrangement and scaling). It encodes only orientation + HiDPI (#108), so resolution changes keep the same display; portrait vs landscape stay distinct. Changing the scheme again resets every user's wallpaper/arrangement for the Side Screen display once.
 - `CodecCapabilities.kt` deliberately excludes software HEVC (c2.android/omx.google) and broken Spreadtrum/Unisoc HW HEVC (omx.sprd.*/c2.sprd.*) — they black-screen; do not "re-enable".
+
+## Upstream sync (tranvuongquocdat/SideScreen, remote `upstream`)
+
+Synced through upstream **`73b8067`** (1.1.1, 2026-11-07); next sync: `git log --oneline 73b8067..upstream/main`. Cherry-picked with `-x` (commit messages name the upstream SHA). Deliberately NOT taken from 0.11.3..1.1.1:
+
+- Play Store only: upload-key signing / AAB (`0d2797b` #83, partly), Play in-app updates (`4d782ee` #86, R8 part taken), in-app review prompt + "Report a problem" link (`2691d68` #98, crash fix taken), Play docs/listing (`0c79609`, `06ea9ac`, `9683d55`).
+- Demo mode + bundled videos (`6aea947` #85) — optional, could be taken later.
+- Developer ID signing + notarization (`7369399` #104) — needs a paid Apple account; the fork uses a self-signed identity instead (`scripts/setup_fork_signing.sh`).
+- Upstream's Sparkle feed/key (`7ea10ea` #107) — mechanics taken, feed + key replaced with the fork's own; the About popover was not taken.
+- Website (`1fb795c`, `1dfa4fd`, `3d7ae82`, `73b8067`), upstream release chores (`88f5ba1`, `561e982`, `fcddb9e`, `977e84a`, `a4d8107`), privacy policy.
+- Open upstream PRs: #43 (unique parts already in), #33 stylus (breaks wire invariant 3). #80 partly ported (device parsing/hints, no picker).

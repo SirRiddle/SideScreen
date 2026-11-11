@@ -28,92 +28,36 @@ echo "Building macOS Host (x86_64)..."
 swift build -c release --arch x86_64
 
 echo "Creating Universal Binary..."
+ARM_BIN="$(swift build -c release --arch arm64 --show-bin-path)"
+X86_BIN="$(swift build -c release --arch x86_64 --show-bin-path)"
 mkdir -p ".build/release-universal"
-lipo -create \
-  .build/arm64-apple-macosx/release/SideScreen \
-  .build/x86_64-apple-macosx/release/SideScreen \
-  -output .build/release-universal/SideScreen
+lipo -create "$ARM_BIN/SideScreen" "$X86_BIN/SideScreen" -output .build/release-universal/SideScreen
+SPARKLE="$ARM_BIN/Sparkle.framework"
+[ -d "$SPARKLE" ] || SPARKLE="$PWD/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 
-# Create .app bundle
-APP_NAME="SideScreen"
-APP_DIR="$ROOT_DIR/$APP_NAME.app"
-
+# .app bundle (binary, Sparkle, icon, Info.plist) — shared with CI
+APP_DIR="$ROOT_DIR/SideScreen.app"
 echo "Creating app bundle..."
-rm -rf "$APP_DIR"
-mkdir -p "$APP_DIR/Contents/MacOS"
-mkdir -p "$APP_DIR/Contents/Resources"
+"$ROOT_DIR/scripts/package_mac_app.sh" .build/release-universal/SideScreen "$SPARKLE" "$VERSION" "$APP_DIR"
 
-# Copy universal binary
-cp .build/release-universal/SideScreen "$APP_DIR/Contents/MacOS/"
-
-# No LaunchAgent plist needed for SMAppService.mainApp
-
-# Copy app icon if exists
-if [ -f "$ROOT_DIR/MacHost/Resources/AppIcon.icns" ]; then
-    cp "$ROOT_DIR/MacHost/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/"
-    echo "  ✓ App icon copied"
+# Sign with the fork's stable identity when it is in the keychain
+# (scripts/setup_fork_signing.sh), so permission grants survive rebuilds.
+# SIDESCREEN_SIGN_IDENTITY overrides; otherwise ad-hoc.
+IDENTITY="${SIDESCREEN_SIGN_IDENTITY:-}"
+if [ -z "$IDENTITY" ] && security find-identity -p codesigning 2>/dev/null | grep -q "SideScreen Fork Code Signing"; then
+    IDENTITY="SideScreen Fork Code Signing"
 fi
-
-# Create Info.plist
-cat > "$APP_DIR/Contents/Info.plist" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key>
-    <string>SideScreen</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.sidescreen.app</string>
-    <key>CFBundleName</key>
-    <string>Side Screen</string>
-    <key>CFBundleDisplayName</key>
-    <string>Side Screen</string>
-    <key>CFBundleVersion</key>
-    <string>$VERSION</string><!-- VERSION -->
-    <key>CFBundleShortVersionString</key>
-    <string>$VERSION</string><!-- VERSION -->
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
-    <key>LSUIElement</key>
-    <false/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSSupportsAutomaticGraphicsSwitching</key>
-    <true/>
-    <key>NSScreenCaptureUsageDescription</key>
-    <string>Side Screen needs screen recording access to capture your virtual display and stream it to your Android device.</string>
-    <key>NSLocalNetworkUsageDescription</key>
-    <string>Side Screen needs Local Network access so your Android tablet can connect to the Mac over WiFi for wireless mode. Without this, only USB-tethered connections work.</string>
-    <key>NSBonjourServices</key>
-    <array>
-        <string>_sidescreen._tcp</string>
-    </array>
-</dict>
-</plist>
-EOF
-
-# Ad-hoc code sign to prevent Gatekeeper "damaged" error
-echo "Code signing (ad-hoc)..."
-codesign --force --deep --sign - --entitlements "$ROOT_DIR/MacHost/SideScreen.entitlements" "$APP_DIR"
+echo "Code signing (${IDENTITY:-ad-hoc})..."
+"$ROOT_DIR/scripts/sign_app.sh" "$APP_DIR" "${IDENTITY:--}"
 echo "  ✓ App signed"
 
 echo ""
 echo "Build successful!"
 echo ""
-echo "App: $ROOT_DIR/$APP_NAME.app"
-echo "To run: open $APP_NAME.app"
+echo "App: $APP_DIR"
+echo "To run: open $APP_DIR"
 
 # Create DMG with Applications symlink
 echo ""
 echo "Creating DMG..."
-DMG_DIR=$(mktemp -d)
-cp -R "$APP_DIR" "$DMG_DIR/"
-ln -s /Applications "$DMG_DIR/Applications"
-DMG_PATH="$ROOT_DIR/SideScreen-${VERSION}-mac-universal.dmg"
-hdiutil create -volname "Side Screen" -srcfolder "$DMG_DIR" -ov -format UDZO "$DMG_PATH"
-rm -rf "$DMG_DIR"
-echo "DMG: $DMG_PATH"
+"$ROOT_DIR/scripts/make_dmg.sh" "$APP_DIR" "$ROOT_DIR/SideScreen-${VERSION}-mac-universal.dmg"

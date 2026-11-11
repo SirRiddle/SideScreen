@@ -22,16 +22,27 @@ let package = Package(
             name: "SideScreen",
             targets: ["SideScreen"])
     ],
+    dependencies: [
+        // Auto-update (fork feed + EdDSA key, see scripts/package_mac_app.sh).
+        // The framework is copied into Contents/Frameworks by the packaging
+        // script; the rpath below is what makes the binary find it there.
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1")
+    ],
     targets: [
         .executableTarget(
             name: "SideScreen",
-            dependencies: [],
+            dependencies: [
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             path: "Sources",
             cSettings: [
                 .unsafeFlags(["-I", sourcesPath])
             ],
             swiftSettings: [
                 .unsafeFlags(["-Xcc", "-fmodule-map-file=\(sourcesPath)/module.modulemap"])
+            ],
+            linkerSettings: [
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])
             ]),
         .testTarget(
             name: "SideScreenTests",

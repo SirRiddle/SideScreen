@@ -14,15 +14,18 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Build (Universal Binary)
+        id: build
         run: |
           cd MacHost
           swift build -c release --arch arm64
           swift build -c release --arch x86_64
+          ARM_BIN="$(swift build -c release --arch arm64 --show-bin-path)"
+          X86_BIN="$(swift build -c release --arch x86_64 --show-bin-path)"
           mkdir -p .build/release-universal
-          lipo -create \
-            .build/arm64-apple-macosx/release/SideScreen \
-            .build/x86_64-apple-macosx/release/SideScreen \
-            -output .build/release-universal/SideScreen
+          lipo -create "$ARM_BIN/SideScreen" "$X86_BIN/SideScreen" -output .build/release-universal/SideScreen
+          SPARKLE="$ARM_BIN/Sparkle.framework"
+          [ -d "$SPARKLE" ] || SPARKLE="$PWD/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+          echo "sparkle=$SPARKLE" >> $GITHUB_OUTPUT
 
       - name: Test
         run: |
@@ -34,3 +37,36 @@ jobs:
           brew install swiftlint
           cd MacHost
           swiftlint lint --config .swiftlint.yml --strict
+
+      # Installable test build of this commit (not a release): same bundle and
+      # signing as release.yml, so it keeps permission grants like a release would.
+      - name: Package test build
+        id: package
+        run: |
+          VERSION="$(cat VERSION)"
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          scripts/package_mac_app.sh MacHost/.build/release-universal/SideScreen \
+            "${{ steps.build.outputs.sparkle }}" "$VERSION" SideScreen.app
+          echo "name=SideScreen-${VERSION}-${SHORT_SHA}-mac-universal" >> $GITHUB_OUTPUT
+
+      - name: Import signing identity
+        id: cert
+        env:
+          MAC_SIGNING_P12_BASE64: ${{ secrets.MAC_SIGNING_P12_BASE64 }}
+          MAC_SIGNING_P12_PASSWORD: ${{ secrets.MAC_SIGNING_P12_PASSWORD }}
+        run: scripts/ci_signing_identity.sh >> $GITHUB_OUTPUT
+
+      - name: Code sign
+        env:
+          SIDESCREEN_SIGN_KEYCHAIN: ${{ steps.cert.outputs.keychain }}
+        run: scripts/sign_app.sh SideScreen.app "${{ steps.cert.outputs.identity }}"
+
+      - name: Create DMG
+        run: scripts/make_dmg.sh SideScreen.app "${{ steps.package.outputs.name }}.dmg"
+
+      - name: Upload test build
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ steps.package.outputs.name }}.dmg
+          retention-days: 14

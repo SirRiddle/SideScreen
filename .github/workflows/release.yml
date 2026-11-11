@@ -22,87 +22,73 @@ jobs:
         run: echo "version=$(cat VERSION)" >> $GITHUB_OUTPUT
 
       - name: Build macOS (Universal Binary)
+        id: build
         run: |
           cd MacHost
           swift build -c release --arch arm64
           swift build -c release --arch x86_64
+          ARM_BIN="$(swift build -c release --arch arm64 --show-bin-path)"
+          X86_BIN="$(swift build -c release --arch x86_64 --show-bin-path)"
           mkdir -p .build/release-universal
-          lipo -create \
-            .build/arm64-apple-macosx/release/SideScreen \
-            .build/x86_64-apple-macosx/release/SideScreen \
-            -output .build/release-universal/SideScreen
+          lipo -create "$ARM_BIN/SideScreen" "$X86_BIN/SideScreen" -output .build/release-universal/SideScreen
+          SPARKLE="$ARM_BIN/Sparkle.framework"
+          [ -d "$SPARKLE" ] || SPARKLE="$PWD/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+          echo "sparkle=$SPARKLE" >> $GITHUB_OUTPUT
 
       - name: Create .app bundle
         run: |
-          VERSION=${{ steps.version.outputs.version }}
-          APP_DIR="SideScreen.app"
-          mkdir -p "$APP_DIR/Contents/MacOS"
-          mkdir -p "$APP_DIR/Contents/Resources"
-          cp MacHost/.build/release-universal/SideScreen "$APP_DIR/Contents/MacOS/"
+          scripts/package_mac_app.sh MacHost/.build/release-universal/SideScreen \
+            "${{ steps.build.outputs.sparkle }}" "${{ steps.version.outputs.version }}" SideScreen.app
 
-          # Copy icon if exists
-          if [ -f "MacHost/Resources/AppIcon.icns" ]; then
-            cp MacHost/Resources/AppIcon.icns "$APP_DIR/Contents/Resources/"
-          fi
+      # Stable self-signed identity (scripts/setup_fork_signing.sh): keeps the
+      # Screen Recording / Accessibility grants across updates, and Sparkle only
+      # installs updates signed by the same identity. Ad-hoc without the secrets.
+      - name: Import signing identity
+        id: cert
+        env:
+          MAC_SIGNING_P12_BASE64: ${{ secrets.MAC_SIGNING_P12_BASE64 }}
+          MAC_SIGNING_P12_PASSWORD: ${{ secrets.MAC_SIGNING_P12_PASSWORD }}
+        run: scripts/ci_signing_identity.sh >> $GITHUB_OUTPUT
 
-          cat > "$APP_DIR/Contents/Info.plist" << EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleExecutable</key>
-              <string>SideScreen</string>
-              <key>CFBundleIconFile</key>
-              <string>AppIcon</string>
-              <key>CFBundleIdentifier</key>
-              <string>com.sidescreen.app</string>
-              <key>CFBundleName</key>
-              <string>Side Screen</string>
-              <key>CFBundleDisplayName</key>
-              <string>Side Screen</string>
-              <key>CFBundleVersion</key>
-              <string>${VERSION}</string>
-              <key>CFBundleShortVersionString</key>
-              <string>${VERSION}</string>
-              <key>CFBundlePackageType</key>
-              <string>APPL</string>
-              <key>LSMinimumSystemVersion</key>
-              <string>13.0</string>
-              <key>LSUIElement</key>
-              <false/>
-              <key>NSHighResolutionCapable</key>
-              <true/>
-              <key>NSSupportsAutomaticGraphicsSwitching</key>
-              <true/>
-              <key>NSScreenCaptureUsageDescription</key>
-              <string>Side Screen needs screen recording access to capture your virtual display and stream it to your Android device.</string>
-              <key>NSLocalNetworkUsageDescription</key>
-              <string>Side Screen needs Local Network access so your Android tablet can connect to the Mac over WiFi for wireless mode. Without this, only USB-tethered connections work.</string>
-              <key>NSBonjourServices</key>
-              <array>
-                  <string>_sidescreen._tcp</string>
-              </array>
-          </dict>
-          </plist>
-          EOF
-
-      - name: Ad-hoc code sign
-        run: codesign --force --deep --sign - SideScreen.app
+      - name: Code sign
+        env:
+          SIDESCREEN_SIGN_KEYCHAIN: ${{ steps.cert.outputs.keychain }}
+        run: scripts/sign_app.sh SideScreen.app "${{ steps.cert.outputs.identity }}"
 
       - name: Create DMG
+        run: scripts/make_dmg.sh SideScreen.app "SideScreen-${{ steps.version.outputs.version }}-mac-universal.dmg"
+
+      # Sparkle feed: appcast.xml is attached to the GitHub Release and read via
+      # releases/latest/download/appcast.xml (SUFeedURL), signed with the EdDSA
+      # key whose public half is SUPublicEDKey (scripts/package_mac_app.sh).
+      # Only for identity-signed builds: Sparkle refuses ad-hoc updates anyway.
+      - name: Generate Sparkle appcast
+        if: steps.cert.outputs.identity != '-'
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          VERSION=${{ steps.version.outputs.version }}
-          mkdir -p dmg-content
-          cp -R SideScreen.app dmg-content/
-          ln -s /Applications dmg-content/Applications
-          hdiutil create -volname "Side Screen" -srcfolder dmg-content -ov -format UDZO "SideScreen-${VERSION}-mac-universal.dmg"
-          rm -rf dmg-content
+          [ -n "$SPARKLE_PRIVATE_KEY" ] || { echo "::error::SPARKLE_PRIVATE_KEY secret missing"; exit 1; }
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$RUNNER_TEMP/sparkle.key"
+          mkdir -p appcast-in
+          cp "SideScreen-${VERSION}-mac-universal.dmg" appcast-in/
+          scripts/changelog_html.py "$VERSION" < CHANGELOG.md > "appcast-in/SideScreen-${VERSION}-mac-universal.html"
+          MacHost/.build/artifacts/sparkle/Sparkle/bin/generate_appcast \
+            --ed-key-file "$RUNNER_TEMP/sparkle.key" \
+            --embed-release-notes \
+            --download-url-prefix "https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}/" \
+            --link "https://github.com/${GITHUB_REPOSITORY}/releases" \
+            -o appcast.xml appcast-in
+          rm -rf "$RUNNER_TEMP/sparkle.key" appcast-in
+          cat appcast.xml
 
       - name: Upload DMG
         uses: actions/upload-artifact@v7
         with:
           name: macos-dmg
-          path: "*.dmg"
+          path: |
+            *.dmg
+            appcast.xml
 
   build-android:
     runs-on: ubuntu-latest
@@ -186,6 +172,7 @@ jobs:
             | Android | `SideScreen-${{ steps.version.outputs.version }}-android.apk` |
           files: |
             artifacts/macos-dmg/*.dmg
+            artifacts/macos-dmg/appcast.xml
             artifacts/android-apk/*.apk
           draft: false
           prerelease: false

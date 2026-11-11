@@ -9,10 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Synced with upstream 1.1.1 fixes (phase 1: bug fixes that don't change the wire protocol).
+
+### Added
+- Android: app logo on the idle connect screen (upstream #106).
+
 ### Changed
 - Android: CameraX 1.3.1 → 1.4.2 and ML Kit barcode scanning 17.2.0 → 17.3.0. Their native libraries are aligned for 16 KB memory pages, which newer Android 15+ devices use; the old ones were 4 KB-aligned.
 
 ### Fixed
+- **Mac: USB mode with more than one Android device attached.** A bare `adb reverse` refuses to run when several devices are connected, so nothing could connect. The tunnel is now set up and checked for each authorized device (upstream #101 / #102).
+- **Android: crash after a failed connection.** Rotating the tablet or leaving the app while it was still connecting could crash it when the error dialog tried to show on the destroyed screen (upstream #103).
+- **Android: crash when dragging the status overlay on narrow screens** such as phones in portrait (upstream #113).
+- **Building with newer Swift toolchains.** `Package.swift` passes absolute module-map paths, so `swift build` no longer fails with "module map file not found" when the compiler runs outside the package directory; `install.sh` keeps an existing `JAVA_HOME` (upstream #81).
 - **Native resolution on panels whose sides aren't multiples of 16.** A 2880×1800 tablet was streamed at 2864×1792 and upscaled back, and a 2340×1080 phone at 2336×1072, so text was slightly soft. The stream now uses the exact panel size whenever the decoder can sustain it. Both the Android and the Mac app need updating for HiDPI captures.
 - **Mac: changing the bitrate while streaming froze the app.** Each step of the slider rebuilt the video encoder on the main thread while frames were still being encoded, which hung macOS's encoder service and with it Side Screen. Bitrate changes now apply to the running encoder without a rebuild, slider bursts collapse into the latest value, and the window stays responsive.
 - **Mac: bitrates above 2147 Mbps were ignored or wrapped.** The encoder takes a 32-bit value, so 2148–4294 Mbps were rejected and the encoder kept its previous bitrate, and anything higher wrapped around (5000 Mbps became 705 Mbps). The encoder now caps at 2147 Mbps, and the fork's settings top out at 2000 Mbps: the 2500/3000/4000/5000 presets are gone, and saved values above 2000 load as 2000.

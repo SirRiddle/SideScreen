@@ -19,6 +19,23 @@ android {
         versionName = appVersion
     }
 
+    // Release signing (fork key, scripts/setup_android_release_key.sh): read from env vars,
+    // set from GitHub secrets in CI or exported locally. Without them release builds fall back
+    // to the debug key so `./gradlew assembleRelease` works on a fresh checkout — but such an
+    // APK cannot update an installed release (different signature).
+    val releaseKeystore = System.getenv("SIDESCREEN_KEYSTORE_PATH")?.let { File(it) }?.takeIf { it.exists() }
+
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = releaseKeystore
+                storePassword = System.getenv("SIDESCREEN_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("SIDESCREEN_KEY_ALIAS") ?: "sidescreen"
+                keyPassword = System.getenv("SIDESCREEN_KEY_PASSWORD") ?: System.getenv("SIDESCREEN_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             // R8: shrink + obfuscate (upstream #86). Debug builds never run it, so
@@ -26,8 +43,13 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Fork: releases keep the debug signing config so installs update in place.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig =
+                if (releaseKeystore != null) {
+                    signingConfigs.getByName("release")
+                } else {
+                    logger.warn("SIDESCREEN_KEYSTORE_PATH not set: release APK signed with the debug key.")
+                    signingConfigs.getByName("debug")
+                }
         }
     }
 

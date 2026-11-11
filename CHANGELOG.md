@@ -50,6 +50,7 @@ Synced with upstream 1.1.1 (everything except Play Store, demo mode and website 
 
 ### Upgrading
 - **Mac:** because the signature changes from ad-hoc to the fork's certificate, macOS asks for Screen Recording and Accessibility again the first time you run 1.2.0. If the Status row stays red, run `tccutil reset ScreenCapture com.sidescreen.app` and `tccutil reset Accessibility com.sidescreen.app`, then grant again. The DMG is not notarized: after copying the app to Applications, run `xattr -cr /Applications/SideScreen.app` once. Updates after 1.2.0 keep the permissions and install through the app.
+- **Android:** release APKs are now signed with the fork's own release key (they used a new random key on every CI run, so every update needed an uninstall). Uninstall the old app once before installing 1.2.0 (wireless users re-pair once); later releases update in place.
 - **Both apps** work with older versions of the other; per-tablet settings, the decoder-limit table and dead-link detection need both updated.
 
 ### Planned

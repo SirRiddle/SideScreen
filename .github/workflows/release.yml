@@ -105,11 +105,22 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      # Every release must carry the same signature or installed apps can't
+      # update (scripts/setup_android_release_key.sh). Fails instead of
+      # silently shipping a debug-signed APK when the secrets are missing.
       - name: Build APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          SIDESCREEN_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
+          [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$SIDESCREEN_KEYSTORE_PASSWORD" ] \
+            || { echo "::error::ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD secrets missing"; exit 1; }
+          export SIDESCREEN_KEYSTORE_PATH="$RUNNER_TEMP/release.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$SIDESCREEN_KEYSTORE_PATH"
           cd AndroidClient
           chmod +x gradlew
           ./gradlew assembleRelease
+          rm -f "$SIDESCREEN_KEYSTORE_PATH"
 
       - name: Rename APK
         run: |

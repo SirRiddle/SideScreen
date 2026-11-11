@@ -4,18 +4,33 @@ on:
   push:
     tags:
       - '[0-9]*'
-  # Manual trigger: lets the fork owner cut the release after enabling Actions,
-  # re-run a failed build, or release without re-pushing a tag.
+  # Manual trigger: cut or re-run the release for an existing tag without
+  # moving it, e.g. on the Intel runner when GitHub has no macOS arm64
+  # capacity (the job is cancelled with "not acquired by Runner of type hosted").
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and release (e.g. 1.2.0). Empty: the ref you run from, which must be a tag.'
+        required: false
+        default: ''
+      mac_runner:
+        description: 'Runner for the macOS build. Same macOS 15 image and Xcode; the app is Universal either way.'
+        type: choice
+        options:
+          - macos-15
+          - macos-15-intel
+        default: macos-15
 
 permissions:
   contents: write
 
 jobs:
   build-mac:
-    runs-on: macos-15
+    runs-on: ${{ inputs.mac_runner || 'macos-15' }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Read version
         id: version
@@ -94,6 +109,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Read version
         id: version
@@ -138,10 +155,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Read version
         id: version
         run: echo "version=$(cat VERSION)" >> $GITHUB_OUTPUT
+
+      # Assets are named from VERSION; a manual run must target a real tag
+      # whose VERSION matches, or the release would get a branch-named tag.
+      - name: Check release tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          [ -n "$INPUT_TAG" ] || [ "$REF_TYPE" = tag ] \
+            || { echo "::error::Run from a tag or pass the tag input"; exit 1; }
+          [ "$(cat VERSION)" = "$TAG" ] \
+            || { echo "::error::VERSION $(cat VERSION) does not match tag $TAG"; exit 1; }
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -171,6 +203,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           name: "Side Screen v${{ steps.version.outputs.version }}"
           body: |
             ## What's Changed

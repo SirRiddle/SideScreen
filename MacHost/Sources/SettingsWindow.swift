@@ -700,14 +700,14 @@ struct SettingsView: View {
                                             }
                                         }
                                         HStack(spacing: 6) {
-                                            ForEach([1200, 1500, 1800], id: \.self) { value in
+                                            ForEach([1200, 1500, 1800, 2000], id: \.self) { value in
                                                 BitrateButton(label: "\(value)", value: value, currentValue: settings.bitrate, disabled: settings.gamingBoost) {
                                                     settings.bitrate = value
                                                 }
                                             }
-                                            // "Max" = the settings ceiling. VideoToolbox rejects or
-                                            // wraps anything above ~2147 Mbps, so presets above it
-                                            // silently set a far lower bitrate (5000 became 705).
+                                            // "Max" = the most VideoToolbox accepts (~2147 Mbps).
+                                            // Anything above is rejected or wraps, so the old
+                                            // 2500-5000 presets set a far lower bitrate (5000 became 705).
                                             BitrateButton(label: "Max", value: DisplaySettings.maxBitrateMbps, currentValue: settings.bitrate, disabled: settings.gamingBoost) {
                                                 settings.bitrate = DisplaySettings.maxBitrateMbps
                                             }
@@ -721,9 +721,9 @@ struct SettingsView: View {
                                         Slider(value: Binding(
                                             get: { Double(settings.bitrate) },
                                             set: { settings.bitrate = Int($0) }
-                                        ), in: Double(DisplaySettings.minBitrateMbps)...Double(DisplaySettings.maxBitrateMbps), step: 10)
+                                        ), in: Double(DisplaySettings.minBitrateMbps)...Double(DisplaySettings.sliderMaxBitrateMbps), step: 10)
                                         .disabled(settings.gamingBoost)
-                                        Text("\(DisplaySettings.maxBitrateMbps)")
+                                        Text("\(DisplaySettings.sliderMaxBitrateMbps)")
                                             .font(.system(size: 9))
                                             .foregroundColor(.secondary)
                                     }
@@ -1407,11 +1407,12 @@ class DisplaySettings: ObservableObject {
         let resolutions: [String]
     }
 
-    /// Bitrate range offered by the settings UI, in Mbps. The ceiling sits
-    /// below VideoEncoder.maxBitrateMbps (~2147, the most VideoToolbox
-    /// accepts) on a round value.
+    /// Bitrate range offered by the settings UI, in Mbps. The ceiling ("Max")
+    /// is VideoEncoder.maxBitrateMbps (~2147, the most VideoToolbox accepts);
+    /// the slider stops at the round 2000 below it.
     static let minBitrateMbps = 20
-    static let maxBitrateMbps = 2000
+    static let maxBitrateMbps = VideoEncoder.maxBitrateMbps
+    static let sliderMaxBitrateMbps = 2000
 
     static func clampBitrateMbps(_ value: Int) -> Int {
         min(max(value, minBitrateMbps), maxBitrateMbps)

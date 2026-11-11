@@ -100,9 +100,13 @@ final class VideoEncoderSettingsTests: XCTestCase {
         XCTAssertEqual(VideoEncoder.averageBitRateBps(bitrateMbps: 5000, gamingBoost: false, floorMbps: 20), Int(Int32.max))
     }
 
-    func testSettingsCeilingIsWithinWhatVideoToolboxAccepts() {
+    func testSettingsMaxIsTheMostVideoToolboxAccepts() {
         XCTAssertEqual(VideoEncoder.maxBitrateMbps, 2147)
-        XCTAssertLessThanOrEqual(DisplaySettings.maxBitrateMbps, VideoEncoder.maxBitrateMbps)
+        XCTAssertEqual(DisplaySettings.maxBitrateMbps, VideoEncoder.maxBitrateMbps)
+        XCTAssertLessThanOrEqual(DisplaySettings.sliderMaxBitrateMbps, DisplaySettings.maxBitrateMbps)
+        // Max is applied as is, not capped further.
+        XCTAssertEqual(VideoEncoder.averageBitRateBps(bitrateMbps: DisplaySettings.maxBitrateMbps, gamingBoost: false), 2_147_000_000)
+        XCTAssertEqual(DisplaySettings.clampBitrateMbps(DisplaySettings.maxBitrateMbps), DisplaySettings.maxBitrateMbps)
     }
 
     func testStoredBitratesFromOlderPresetsAreClamped() {

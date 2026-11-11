@@ -27,6 +27,11 @@ class StreamClient(
     private var outputStream: java.io.DataOutputStream? = null
     private var isConnected = false
 
+    /** Dead-link watchdog state (LinkLiveness, issue #72). nanoTime; 0 = not armed. */
+    @Volatile private var lastPongNs = 0L
+
+    @Volatile private var lastPingCallNs = 0L
+
     // Callback includes actual frame size (may differ from buffer.size due to pooling),
     // receive timestamp, and whether the frame can restart HEVC decoding.
     var onFrameReceived: ((ByteArray, Int, Long, Boolean) -> Unit)? = null
@@ -153,6 +158,8 @@ class StreamClient(
                 advertiseDesktopGeometrySupport() // Likewise
                 advertiseIdentity() // Likewise: the Mac picks this tablet's profile when type 8 lands
                 advertiseFrameMetadataSupport()
+                lastPongNs = System.nanoTime() // arm the dead-link watchdog from connect time
+                lastPingCallNs = 0L
                 isConnected = true
                 lastKeyframeReceivedNs = 0L
                 synchronized(keyframeRequestLock) {
@@ -379,6 +386,8 @@ class StreamClient(
                 advertiseDesktopGeometrySupport() // Likewise
                 advertiseIdentity() // Likewise: the Mac picks this tablet's profile when type 8 lands
                 advertiseFrameMetadataSupport()
+                lastPongNs = System.nanoTime() // arm the dead-link watchdog from connect time
+                lastPingCallNs = 0L
                 isConnected = true
                 diagLog("Wireless connected to $host:$port")
                 onConnectionStatus?.invoke(true)
@@ -534,7 +543,9 @@ class StreamClient(
                             val buf = ByteArray(8)
                             input.readFully(buf)
                             val sentTime = ByteBuffer.wrap(buf).order(ByteOrder.LITTLE_ENDIAN).long
-                            val rtt = (System.nanoTime() - sentTime) / 1_000_000.0 // ms
+                            val now = System.nanoTime()
+                            lastPongNs = now
+                            val rtt = (now - sentTime) / 1_000_000.0 // ms
                             onLatencyMeasured?.invoke(rtt)
                         }
 
@@ -663,6 +674,25 @@ class StreamClient(
      */
     fun sendPing() {
         if (!isConnected) return
+        val now = System.nanoTime()
+        val previousCall = lastPingCallNs
+        lastPingCallNs = now
+        if (LinkLiveness.timerWasPaused(now, previousCall)) {
+            // Our own process was not running; don't blame the link for that time.
+            lastPongNs = now
+        } else if (LinkLiveness.isDead(now, lastPongNs)) {
+            val silentMs = (now - lastPongNs) / 1_000_000
+            Log.w(TAG, "No pong for ${silentMs}ms — link is dead, closing the socket")
+            diagLog("Dead link: no pong for ${silentMs}ms — closing socket (receive loop then reports the drop)")
+            lastPongNs = 0L
+            // Unblocks readByte() in the receive loop, whose finally{} runs the normal
+            // disconnect path, so the app's involuntary-drop reconnect takes over.
+            try {
+                socket?.close()
+            } catch (_: IOException) {
+            }
+            return
+        }
         val buffer = ByteBuffer.allocate(9).order(ByteOrder.LITTLE_ENDIAN)
         buffer.put(4.toByte()) // Type 4: ping
         buffer.putLong(System.nanoTime())

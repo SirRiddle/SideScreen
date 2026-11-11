@@ -1214,37 +1214,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let deltaY = point.y - touchLastPosition.y
         let totalDistance = hypot(point.x - touchStartPosition.x, point.y - touchStartPosition.y)
 
-        switch gestureState {
-        case .pending:
-            if totalDistance > GestureThresholds.tapMaxDistance {
-                cancelLongPressTimer()
-                // 1-finger move = scroll (upstream behavior). Slow deliberate
-                // drags still work via long-press-then-drag from .longPressReady.
-                // Cursor follows in .pending up to this point (unlike upstream).
-                gestureState = .scrolling
-                let sx = deltaX * GestureThresholds.scrollSensitivity
-                let sy = deltaY * GestureThresholds.scrollSensitivity
-                injectScrollEvent(deltaX: sx, deltaY: sy, at: point)
-                lastScrollDeltaX = sx
-                lastScrollDeltaY = sy
-            } else {
-                // Cursor follows the finger so positioning feels immediate
-                // instead of freezing at the down point while we wait to
-                // decide if this is a tap or a drag/scroll.
-                moveCursor(to: point)
-            }
+        // Decisions live in OneFingerGestureRules (unit-tested); this applies them.
+        switch OneFingerGestureRules.onMove(state: gestureState, distanceFromStart: totalDistance) {
+        case .startScroll:
+            cancelLongPressTimer()
+            // 1-finger move = scroll (upstream behavior). Slow deliberate
+            // drags still work via long-press-then-drag from .longPressReady.
+            // Cursor follows in .pending up to this point (unlike upstream).
+            gestureState = .scrolling
+            let sx = deltaX * GestureThresholds.scrollSensitivity
+            let sy = deltaY * GestureThresholds.scrollSensitivity
+            injectScrollEvent(deltaX: sx, deltaY: sy, at: point)
+            lastScrollDeltaX = sx
+            lastScrollDeltaY = sy
 
-        case .longPressReady:
-            if totalDistance > GestureThresholds.tapMaxDistance {
-                // Long press + drag is still a synthetic left-mouse drag;
-                // .longPressReady can only be reached by holding without
-                // matching the threshold, so the drag starts here.
-                gestureState = .dragging
-                injectMouseDown(at: touchStartPosition)
-                injectMouseDragged(to: point)
-            }
+        case .followCursor:
+            // Cursor follows the finger so positioning feels immediate
+            // instead of freezing at the down point while we wait to
+            // decide if this is a tap or a drag/scroll.
+            moveCursor(to: point)
 
-        case .scrolling:
+        case .startDrag:
+            // Long press + drag is still a synthetic left-mouse drag;
+            // .longPressReady can only be reached by holding without
+            // matching the threshold, so the drag starts here.
+            gestureState = .dragging
+            injectMouseDown(at: touchStartPosition)
+            injectMouseDragged(to: point)
+
+        case .scroll:
             let sx = deltaX * GestureThresholds.scrollSensitivity
             let sy = deltaY * GestureThresholds.scrollSensitivity
             injectScrollEvent(deltaX: sx, deltaY: sy, at: point)
@@ -1253,10 +1251,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 lastScrollDeltaX = sx
                 lastScrollDeltaY = sy
             }
-        case .dragging, .penDrawing:
+
+        case .drag:
             injectMouseDragged(to: point)
 
-        default:
+        case .ignore:
             break
         }
 
@@ -1269,54 +1268,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let now = DispatchTime.now().uptimeNanoseconds
         let distance = hypot(point.x - touchStartPosition.x, point.y - touchStartPosition.y)
 
-        switch gestureState {
-        case .pending:
-            // Lift before the long-press timer fired → tap (or double tap).
-            // The timer (longPressTime, 600ms) is the sole cutoff: if it
-            // already fired the state is .longPressReady, not .pending.
-            // Removing the old `elapsed < tapMaxTime (250ms)` gate fixes
-            // the 250–600ms dead zone where a deliberate press produced
-            // NO click at all — buttons that "didn't respond."
-            if distance < GestureThresholds.tapMaxDistance {
-                // Check double tap
-                let timeSinceLastTap = now - lastTapTime
-                let distFromLastTap = hypot(point.x - lastTapPosition.x, point.y - lastTapPosition.y)
-
-                if timeSinceLastTap < GestureThresholds.doubleTapMaxTime
-                    && distFromLastTap < GestureThresholds.doubleTapMaxDistance {
-                    performDoubleClick(at: point)
-                    lastTapTime = 0  // Reset so triple tap doesn't trigger
-                } else {
-                    performClick(at: point)
-                    lastTapTime = now
-                    lastTapPosition = point
-                }
-            }
-
-        case .longPressReady:
-            // Held long but didn't drag → right click
+        // Lift before the long-press timer fired → tap (or double tap); the
+        // timer (600 ms) is the sole cutoff, so there is no 250–600 ms dead
+        // zone. Held without moving → right click. Fast flick → momentum.
+        // Decisions in OneFingerGestureRules (unit-tested).
+        let decision = OneFingerGestureRules.onUp(
+            state: gestureState,
+            distanceFromStart: distance,
+            sinceLastTapNs: lastTapTime == 0 ? nil : now - lastTapTime,
+            distanceFromLastTap: hypot(point.x - lastTapPosition.x, point.y - lastTapPosition.y),
+            sinceLastMoveNs: now - touchLastMoveTime,
+            lastScrollDeltaX: lastScrollDeltaX,
+            lastScrollDeltaY: lastScrollDeltaY
+        )
+        switch decision {
+        case .click:
+            performClick(at: point)
+            lastTapTime = now
+            lastTapPosition = point
+        case .doubleClick:
+            performDoubleClick(at: point)
+            lastTapTime = 0  // Reset so triple tap doesn't trigger
+        case .rightClick:
             performRightClick(at: point)
-
-        case .scrolling:
-            // A lift from a fast-flick scroll starts momentum; the user wants
-            // the page to keep coasting after the finger leaves.
-            let timeSinceLastMove = now - touchLastMoveTime
-            if timeSinceLastMove < 50_000_000 {
-                let threshold: CGFloat = 2.0
-                if abs(lastScrollDeltaX) > threshold || abs(lastScrollDeltaY) > threshold {
-                    startMomentumScroll(
-                        velocityX: lastScrollDeltaX * 6.0,
-                        velocityY: lastScrollDeltaY * 6.0,
-                        at: point
-                    )
-                }
-            }
-
-        case .dragging, .penDrawing:
+        case let .momentum(velocityX, velocityY):
+            startMomentumScroll(velocityX: velocityX, velocityY: velocityY, at: point)
+        case .releaseDrag:
             // .penDrawing only lands here if the mode was switched off mid-stroke.
             injectMouseUp(at: point)
-
-        default:
+        case .nothing:
             break
         }
 

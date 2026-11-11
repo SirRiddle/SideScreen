@@ -129,15 +129,18 @@ class WirelessTabController(
      * confusing because it could run silently while the user toggled tabs.
      */
     fun show() {
+        // A saved pairing wins over the camera state (issue #73): a tablet that
+        // paired by code with the camera permanently denied must still reach its
+        // Reconnect card on launch. Same order as onStreamDisconnected.
+        val entry = storage.load()
         when {
-            cameraPerm.isPermanentlyDenied() -> transition(State.PERM_DENIED)
-            storage.load() == null -> transition(State.FIRST_TIME)
-            else -> {
-                val entry = storage.load()!!
+            entry != null -> {
                 views.idleMacName.text = entry.macName
                 views.idleMacIp.text = "${entry.host}:${entry.port}"
                 transition(State.PAIRED_IDLE)
             }
+            cameraPerm.isPermanentlyDenied() -> transition(State.PERM_DENIED)
+            else -> transition(State.FIRST_TIME)
         }
     }
 

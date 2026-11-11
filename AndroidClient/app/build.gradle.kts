@@ -9,19 +9,24 @@ val computedVersionCode = versionParts[0].toInt() * 10000 + versionParts[1].toIn
 
 android {
     namespace = "com.sidescreen.app"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.sidescreen.app"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 36
         versionCode = computedVersionCode
         versionName = appVersion
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8: shrink + obfuscate (upstream #86). Debug builds never run it, so
+            // verify a release APK on a device after dependency changes.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Fork: releases keep the debug signing config so installs update in place.
             signingConfig = signingConfigs.getByName("debug")
         }
     }

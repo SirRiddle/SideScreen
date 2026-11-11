@@ -1,13 +1,13 @@
 # CLAUDE.md
 
-Context for agents working in this repo. Version of record: `VERSION` (currently 0.11.2).
+Context for agents working in this repo. Version of record: `VERSION` (currently 1.2.0).
 
 ## What this is
 
 Side Screen turns an Android tablet into a wireless/USB second display for macOS.
 
 - **MacHost/** — Swift 5.9 SPM executable (menu-bar app): creates a virtual display via the **private** `CGVirtualDisplay` API, captures it with ScreenCaptureKit, encodes HEVC (H.264 fallback) with VideoToolbox, streams raw Annex-B NAL units over one TCP socket.
-- **AndroidClient/** — Kotlin app (`com.sidescreen.app`, AGP 8.4.0, minSdk 26, target 34): decodes via MediaCodec into a SurfaceView and sends touch events back over the same socket.
+- **AndroidClient/** — Kotlin app (`com.sidescreen.app`, AGP 8.9.1 / Gradle 8.13, minSdk 26, compile/target 36, R8 on release): decodes via MediaCodec into a SurfaceView and sends touch events back over the same socket.
 - **scripts/** — bash build/release/dev harnesses. **StreamTest/**, **CaptureTest/** — standalone SwiftPM diagnostic rigs (encoder/capture experiments). **website/** — static landing page (Vercel).
 
 ## Commands
@@ -18,7 +18,7 @@ cd MacHost && swift build -c release        # single-arch debug: swift build
 cd MacHost && swift test                    # XCTest unit tests (pure logic only)
 cd MacHost && swiftlint lint --config .swiftlint.yml --strict
 
-./scripts/build_mac.sh                      # universal binary + SideScreen.app + DMG (ad-hoc signed)
+./scripts/build_mac.sh                      # universal binary + SideScreen.app + DMG (fork identity if in keychain, else ad-hoc; needs full Xcode — CLT lacks SwiftUI macros)
 ./scripts/run.sh                            # open latest build; sets adb reverse if device attached
 
 # Android client (JAVA_HOME must point at Android Studio's JBR — build_android.sh sets it)
@@ -70,8 +70,9 @@ Hard invariants (golden-byte tests in `HandshakeCodecTests.swift` / `AuthHandsha
 ## Gotchas
 
 - `Package.swift` uses `unsafeFlags` to inject `Sources/module.modulemap` (exposes the private CGVirtualDisplay ObjC bridge to Swift). Any CI/build step that strips unsafe flags breaks the build.
-- Private API + no sandbox: entitlements (`SideScreen.entitlements`) disable sandbox and library validation; app is ad-hoc signed — cannot ship to App Store; users must `xattr -cr`.
-- **Stale scripts**: `scripts/run.sh`, `dev-test.sh`, `setup-usb.sh` still hardcode `adb reverse tcp:8888`; the app default port is **54321** since >0.7.1 (`SettingsWindow.swift`). The running app sets up its own forwarding on `settings.port`, so script-level 8888 forwarding is inert legacy.
+- Private API + no sandbox: entitlements (`SideScreen.entitlements`) disable sandbox and library validation — cannot ship to App Store. Not notarized: manual installs need `xattr -cr` once.
+- **Signing + Sparkle**: builds are signed with the fork's self-signed identity "SideScreen Fork Code Signing" (`scripts/setup_fork_signing.sh` creates it + the Sparkle EdDSA key; CI imports it from secrets `MAC_SIGNING_P12_BASE64`/`MAC_SIGNING_P12_PASSWORD`, appcast signed with `SPARKLE_PRIVATE_KEY`). The designated requirement pins the certificate leaf: TCC grants survive updates and Sparkle only accepts updates from the same identity — never ship an ad-hoc or differently-signed release, or every user re-grants and auto-update breaks. Feed URL + `SUPublicEDKey` live only in `scripts/package_mac_app.sh` (never upstream's). One bundle layout: `package_mac_app.sh` → `sign_app.sh` → `make_dmg.sh`, used by `build_mac.sh`, `build-mac.yml` (signed test DMG artifact per run) and `release.yml`.
+- Default port is **54321** (`SettingsWindow.swift`; Android `PreferencesManager.DEFAULT_PORT`). The running app sets up its own `adb reverse` per device serial on `settings.port`; adb is located by `ADBLocator` (custom path setting, `$ANDROID_HOME`, Homebrew, Android Studio, nix, MacPorts, then the login shell PATH in the background).
 - Single client slot: a new TCP connection cancels the old one; the Android USB checklist probes 127.0.0.1 and can fight a live wireless session.
 - Gesture aborts (`cancelActiveRemoteGesture`) must release the synthetic left button for BOTH `.dragging` and `.penDrawing` — pen mode holds the button down for whole strokes, and missing either strands the Mac mouse down until a real click.
 - Token + video travel plaintext (UserDefaults storage on both sides, `usesCleartextTraffic=true`).

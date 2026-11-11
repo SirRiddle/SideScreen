@@ -383,8 +383,39 @@ class StreamingServer {
         }
     }
 
+    /// How long a newcomer may take to prove itself while another client is
+    /// streaming (issue #69): finish the wireless handshake, or (USB) send its
+    /// first bytes. A LAN peer that hasn't authenticated by then is dropped.
+    static let admissionTimeout: TimeInterval = 5
+    /// A loopback newcomer that stays silent this long while another client
+    /// streams is taken for a legacy client (they send no capability adverts)
+    /// and gets the slot. Longer than the tablet checklist probe's 700 ms read
+    /// timeout, so the probe gives up before it could evict anyone.
+    static let loopbackSilenceGrace: TimeInterval = 1.5
+
+    /// A connection that arrived while a client was streaming, being admitted
+    /// on the side (issue #69). It replaces the live client only once admitted;
+    /// a peer that fails or never finishes admission costs the user nothing.
+    private var pendingConnection: NWConnection?
+
     private func handleConnection(_ newConnection: NWConnection) {
         debugLog("New connection incoming...")
+
+        if connection != nil, connectionReady {
+            stagePendingConnection(newConnection)
+            return
+        }
+        adoptConnection(newConnection)
+        newConnection.start(queue: networkQueue)
+    }
+
+    /// Make `newConnection` the client: drop the previous one (and any
+    /// newcomer still being admitted) and reset all per-client state.
+    private func adoptConnection(_ newConnection: NWConnection) {
+        if let pending = pendingConnection, pending !== newConnection {
+            pending.cancel()
+        }
+        pendingConnection = nil
 
         // Clean up old connection properly
         if let oldConnection = connection {
@@ -408,7 +439,7 @@ class StreamingServer {
         connection = newConnection
         droppedFrames = 0
 
-        connection?.stateUpdateHandler = { [weak self] state in
+        newConnection.stateUpdateHandler = { [weak self] state in
             debugLog("Connection state: \(state)")
             switch state {
             case .ready:
@@ -423,8 +454,114 @@ class StreamingServer {
                 break
             }
         }
+    }
 
-        connection?.start(queue: networkQueue)
+    // MARK: - Admission while a client streams (issue #69)
+
+    /// Any TCP connect used to evict the streaming client before the newcomer
+    /// was checked at all: a port scan, the tablet's own checklist probe, a
+    /// rejected token or a second tablet's code pairing all dropped the stream.
+    /// Now the newcomer is admitted on the side and only then swapped in.
+    private func stagePendingConnection(_ newConnection: NWConnection) {
+        if let previous = pendingConnection {
+            debugLog("A newer connection replaces the one still being admitted")
+            previous.cancel()
+        }
+        pendingConnection = newConnection
+        debugLog("A client is streaming — admitting the newcomer before it gets the slot")
+
+        newConnection.stateUpdateHandler = { [weak self] state in
+            guard let self = self else { return }
+            switch state {
+            case .ready:
+                self.admitPendingConnection(newConnection)
+            case .failed, .cancelled:
+                if self.pendingConnection === newConnection {
+                    self.pendingConnection = nil
+                    debugLog("Newcomer left before admission — streaming client kept")
+                }
+            default:
+                break
+            }
+        }
+        newConnection.start(queue: networkQueue)
+
+        networkQueue.asyncAfter(deadline: .now() + Self.admissionTimeout) { [weak self] in
+            guard let self = self, self.pendingConnection === newConnection else { return }
+            debugLog("Newcomer not admitted within \(Int(Self.admissionTimeout))s — dropped, streaming client kept")
+            self.pendingConnection = nil
+            newConnection.cancel()
+        }
+    }
+
+    private func admitPendingConnection(_ conn: NWConnection) {
+        guard pendingConnection === conn else { return }
+        if conn.endpoint.isLoopback {
+            admitPendingLoopback(conn)
+            return
+        }
+        guard let expected = expectedAuthToken else {
+            debugLog("Rejecting non-loopback newcomer: wireless mode not active — streaming client kept")
+            pendingConnection = nil
+            conn.cancel()
+            return
+        }
+        debugLog("Newcomer via LAN — running auth handshake on the side")
+        runAuthHandshake(connection: conn, expectedToken: expected) { [weak self] deviceName in
+            guard let self = self, self.pendingConnection === conn else {
+                conn.cancel()
+                return
+            }
+            self.promotePendingConnection(conn)
+            self.completeWirelessAdmission(on: conn, deviceName: deviceName)
+        }
+    }
+
+    /// USB clients advertise their capabilities the moment they connect, so
+    /// a loopback newcomer gets the slot on its first bytes. One that closes
+    /// without a word (the tablet's checklist probe) never does; one that
+    /// stays open but silent past the grace is a legacy client and does.
+    private func admitPendingLoopback(_ conn: NWConnection) {
+        var settled = false
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 256) { [weak self] data, _, _, error in
+            guard let self = self else { return }
+            if settled {
+                // Promoted by the grace timer before this arrived: it is the
+                // client's first input, so hand it to the protocol.
+                if self.connection === conn, let data = data, !data.isEmpty {
+                    self.inputBuffer.append(data)
+                    self.processInputBuffer(connection: conn)
+                }
+                return
+            }
+            settled = true
+            guard self.pendingConnection === conn else { return }
+            guard let data = data, !data.isEmpty, error == nil else {
+                debugLog("Loopback newcomer closed without speaking — streaming client kept")
+                self.pendingConnection = nil
+                conn.cancel()
+                return
+            }
+            self.promotePendingConnection(conn)
+            self.inputBuffer.append(data)
+            debugLog("Client connected via loopback (USB) — skipping auth")
+            self.beginExistingProtocol(on: conn)
+            self.processInputBuffer(connection: conn)
+        }
+        networkQueue.asyncAfter(deadline: .now() + Self.loopbackSilenceGrace) { [weak self] in
+            guard let self = self, !settled, self.pendingConnection === conn else { return }
+            settled = true
+            debugLog("Silent loopback newcomer still open after \(Self.loopbackSilenceGrace)s — taking it as a legacy client")
+            self.promotePendingConnection(conn)
+            self.beginExistingProtocol(on: conn)
+        }
+    }
+
+    /// The admitted newcomer becomes the client; the streaming one is dropped.
+    private func promotePendingConnection(_ conn: NWConnection) {
+        guard pendingConnection === conn else { return }
+        debugLog("Newcomer admitted — it replaces the streaming client")
+        adoptConnection(conn)
     }
 
     private func onConnectionReady(_ conn: NWConnection) {
@@ -439,7 +576,17 @@ class StreamingServer {
             return
         }
         debugLog("Client connected via LAN — running auth handshake")
-        runAuthHandshake(connection: conn, expectedToken: expected)
+        runAuthHandshake(connection: conn, expectedToken: expected) { [weak self] deviceName in
+            self?.completeWirelessAdmission(on: conn, deviceName: deviceName)
+        }
+    }
+
+    /// After a successful SSWA handshake on the current connection.
+    private func completeWirelessAdmission(on conn: NWConnection, deviceName: String) {
+        guard connection === conn else { return }
+        handshakeDeviceName = deviceName
+        onWirelessClientPaired?(deviceName)
+        beginExistingProtocol(on: conn)
     }
 
     private func beginExistingProtocol(on conn: NWConnection) {
@@ -489,7 +636,14 @@ class StreamingServer {
         onClientConnected?()
     }
 
-    private func runAuthHandshake(connection conn: NWConnection, expectedToken: Data) {
+    /// SSWA/SSPC handshake on `conn`, which need not be the current connection
+    /// (a newcomer is admitted on the side while a client streams, #69).
+    /// `onAuthenticated` runs after a valid token was answered with OK.
+    private func runAuthHandshake(
+        connection conn: NWConnection,
+        expectedToken: Data,
+        onAuthenticated: @escaping (_ deviceName: String) -> Void
+    ) {
         // Read fixed prefix [magic 4][token 32][name_len 1] = 37 bytes.
         conn.receive(minimumIncompleteLength: HandshakeCodec.fixedPrefixLen,
                      maximumLength: HandshakeCodec.fixedPrefixLen) { [weak self] prefixData, _, _, error in
@@ -520,9 +674,7 @@ class StreamingServer {
                     if WirelessAuth.validate(parsed.token, expected: expectedToken) {
                         debugLog("Wireless auth OK — device: \(parsed.deviceName)")
                         self.sendAuthResponse(conn, status: .ok, thenClose: false)
-                        self.handshakeDeviceName = parsed.deviceName
-                        self.onWirelessClientPaired?(parsed.deviceName)
-                        self.beginExistingProtocol(on: conn)
+                        onAuthenticated(parsed.deviceName)
                     } else {
                         debugLog("Wireless auth rejected: token mismatch")
                         self.sendAuthResponse(conn, status: .invalidToken, thenClose: true)
@@ -718,7 +870,10 @@ class StreamingServer {
         }
 
         connection.receive(minimumIncompleteLength: 1, maximumLength: 256) { [weak self] data, _, isComplete, error in
-            guard let self = self, self.isReceiving, !self.isStopped else { return }
+            // `self.connection === connection`: a superseded connection's late
+            // completion (its cancel error) must not stop the new client's
+            // loop or clear its input.
+            guard let self = self, self.isReceiving, !self.isStopped, self.connection === connection else { return }
 
             if error != nil || isComplete {
                 self.isReceiving = false
@@ -1105,6 +1260,8 @@ class StreamingServer {
         frameQueue.sync {}
         receiveQueue.sync {}
 
+        pendingConnection?.cancel()
+        pendingConnection = nil
         connection?.cancel()
         listener?.cancel()
         connection = nil

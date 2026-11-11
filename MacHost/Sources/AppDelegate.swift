@@ -267,7 +267,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         settings.$gamingBoost
             .dropFirst() // Skip initial value
             .sink { [weak self] gamingBoost in
-                guard let self = self, self.settings.isRunning else { return }
+                // A profile switch rebuilds display + capture + encoder itself
+                // (Gaming Boost is part of ProfileSettings.displayShape); a full
+                // restart here would drop the tablet that is connecting.
+                guard let self = self, self.settings.isRunning, !self.isSwitchingProfile else { return }
                 debugLog("🎮 Gaming Boost \(gamingBoost ? "ENABLED" : "DISABLED") — full pipeline restart so display, capture, and encoder agree on the effective rate")
                 // Encoder-only rebuild lied about 120 Hz (the virtual display kept
                 // its original rate). Rebuild the whole chain; the client

@@ -6,8 +6,23 @@ enum StatusDetector {
         return adbExecutablePath() != nil
     }
 
+    /// Runs on the main thread every 2 s. Address-based on purpose: a
+    /// name-based target ("1.1.1.1" as a host name) goes through the resolver,
+    /// and SCNetworkReachabilityGetFlags then blocks the caller until it
+    /// answers — up to ~30 s on some networks (VPN, captive portal). That froze
+    /// the settings window, e.g. the USB/Wireless toggle needing 2–30 s of
+    /// clicking (#76). An address target only consults the routing table.
     static func wifiReachable() -> Bool {
-        guard let reach = SCNetworkReachabilityCreateWithName(nil, "1.1.1.1") else { return false }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("1.1.1.1")
+        let target = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                SCNetworkReachabilityCreateWithAddress(nil, $0)
+            }
+        }
+        guard let reach = target else { return false }
         var flags = SCNetworkReachabilityFlags()
         guard SCNetworkReachabilityGetFlags(reach, &flags) else { return false }
         return flags.contains(.reachable) && !flags.contains(.connectionRequired)

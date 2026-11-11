@@ -273,6 +273,9 @@ class ScreenCapture {
     private var clientDecodeLimit: (width: Int, height: Int)?
     /// The same ceiling measured per frame rate (type 14), when the client sent it.
     private var clientDecodeLimitTable: [Int: (width: Int, height: Int)]?
+    /// Settings → "Low latency at 120 Hz" (CodecLimits.budget preferLowLatency).
+    /// Set before startStreaming; a change restarts the pipeline.
+    var preferLowLatencySize = true
 
     /// Encode dimensions for a codec: physical display pixels, clamped to the
     /// client's reported ceiling when known, else to the conservative AVC floor
@@ -286,7 +289,7 @@ class ScreenCapture {
         let phys = (displayWidth, displayHeight)
         // A reported limit is authoritative for both codecs: it is what the
         // client's own MediaCodec claims it can decode.
-        if let budget = CodecLimits.budget(limit: clientDecodeLimit, table: clientDecodeLimitTable, forFps: refreshRate) {
+        if let budget = CodecLimits.budget(limit: clientDecodeLimit, table: clientDecodeLimitTable, forFps: refreshRate, preferLowLatency: preferLowLatencySize) {
             return CodecLimits.clampToClientLimit(width: phys.0, height: phys.1, limit: budget)
         }
         switch codec {
@@ -895,7 +898,7 @@ class ScreenCapture {
         let sizeAfter = encodeSize(for: newCodec)
         guard codecChanged || sizeBefore != sizeAfter else { return }
         if sizeBefore != sizeAfter {
-            let budget = CodecLimits.budget(limit: clientLimit, table: clientLimitTable, forFps: refreshRate)
+            let budget = CodecLimits.budget(limit: clientLimit, table: clientLimitTable, forFps: refreshRate, preferLowLatency: preferLowLatencySize)
             let limitDesc = budget.map { "\($0.width)x\($0.height) at \(refreshRate) fps" } ?? "none"
             debugLog("Encode size \(sizeBefore.width)x\(sizeBefore.height) -> \(sizeAfter.width)x\(sizeAfter.height) (client decoder limit: \(limitDesc))")
         }

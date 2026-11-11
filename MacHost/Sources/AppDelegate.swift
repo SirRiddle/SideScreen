@@ -289,6 +289,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
+        // The stream size is chosen when a client negotiates; rebuild so the
+        // new size takes effect (the tablet reconnects on its own).
+        settings.$lowLatencyStreamSize
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] enabled in
+                guard let self = self, !self.isSwitchingProfile else { return }
+                self.restartRunningServer(reason: "Low latency at 120 Hz \(enabled ? "on" : "off")")
+            }
+            .store(in: &cancellables)
+
         // Observer cho bitrate/quality changes (chỉ khi không gaming boost)
         Publishers.CombineLatest(settings.$bitrate, settings.$quality)
             .dropFirst()
@@ -818,6 +829,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             )
         }
         let capture = try await ScreenCapture()
+        capture.preferLowLatencySize = settings.lowLatencyStreamSize
         capture.onCaptureMethodChanged = { [weak self] method in
             guard let self = self else { return }
             debugLog("Capture method: \(method)")

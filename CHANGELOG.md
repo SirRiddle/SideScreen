@@ -27,6 +27,7 @@ Synced with upstream 1.1.1 (everything except Play Store, demo mode and website 
 ### Changed
 - Android: built for Android 16 (`targetSdk`/`compileSdk` 36, AGP 8.9.1, Gradle 8.13), and release builds are shrunk with R8 (24 MB instead of 29 MB).
 - Android: the wireless pairing token and the new per-install device ID are excluded from cloud backups and device-to-device transfer (#89).
+- **Mac: "Low latency at 120 Hz"** (Gaming Boost section, on by default). Upstream #78/#88 lets the Mac stream the full size a tablet's decoder reports even at 120 Hz; on a 3392×2400 tablet that is 3024×1964 per frame instead of 2384×1536, which raised frame age from ~25 to ~35 ms and lowered the delivered frame rate. With the setting on (the 0.12.x sizing) the refresh rate stays 120 Hz and each frame is smaller; turn it off for the sharpest picture.
 - Mac: bitrate presets are now 100–2000 Mbps plus **Max** (2147 Mbps, the most macOS's encoder accepts).
 - Android: CameraX 1.3.1 → 1.4.2 and ML Kit barcode scanning 17.2.0 → 17.3.0. Their native libraries are aligned for 16 KB memory pages, which newer Android 15+ devices use; the old ones were 4 KB-aligned.
 

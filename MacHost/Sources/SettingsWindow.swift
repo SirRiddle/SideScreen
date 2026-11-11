@@ -646,6 +646,20 @@ struct SettingsView: View {
                                         .labelsHidden()
                                 }
 
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Low latency at 120 Hz")
+                                            .font(.system(size: 12, weight: .medium))
+                                        Text("Above 60 Hz, send a smaller picture so each frame arrives sooner. Off: the full size your tablet can decode — sharpest, more input lag.")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                    Spacer()
+                                    Toggle("", isOn: $settings.lowLatencyStreamSize)
+                                        .labelsHidden()
+                                }
+
                                 if settings.gamingBoost {
                                     VStack(alignment: .leading, spacing: 6) {
                                         HStack(spacing: 4) {
@@ -1290,6 +1304,11 @@ class DisplaySettings: ObservableObject {
     @Published var gamingBoost: Bool {
         didSet { save("gamingBoost", gamingBoost) }
     }
+    /// Above 60 Hz, stream at the 60 Hz size scaled to the rate (lower input
+    /// lag) instead of the largest size the tablet's decoder reports (sharpest).
+    @Published var lowLatencyStreamSize: Bool {
+        didSet { save("lowLatencyStreamSize", lowLatencyStreamSize) }
+    }
     @Published var port: UInt16 {
         didSet { save("port", Int(port)) }
     }
@@ -1377,6 +1396,7 @@ class DisplaySettings: ObservableObject {
         self.bitrate = 1000  // legacy placeholder; per-transport migration runs at the end
         self.quality = defaults.string(forKey: keyPrefix + "quality") ?? "ultralow"  // Default: fastest encoding
         self.gamingBoost = defaults.bool(forKey: keyPrefix + "gamingBoost")
+        self.lowLatencyStreamSize = defaults.object(forKey: keyPrefix + "lowLatencyStreamSize") as? Bool ?? true
         // Default port 54321 (was 8888 in <=0.7.1; 8888 collides with jupyter/splunk/HP printers).
         // Existing users keep their saved value.
         self.port = UInt16(defaults.object(forKey: keyPrefix + "port") as? Int ?? 54321)

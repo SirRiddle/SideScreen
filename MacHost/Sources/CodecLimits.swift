@@ -82,7 +82,29 @@ enum CodecLimits {
     /// panel and the 60 fps budget, so scaling it for faster streams shrank
     /// panels whose decoder had budget to spare (issue #78). Without a table,
     /// the single limit scaled as before. Nil when the client reported nothing.
+    ///
+    /// `preferLowLatency`: above 60 fps, never more pixels per frame than the
+    /// 60 fps budget scaled down by area to `fps` (the 0.12.x sizing). The
+    /// decoder may sustain more, but every extra pixel is also capture, encode
+    /// and USB/WiFi time on each frame: on a 3392x2400 tablet at 120 Hz the
+    /// full 3024x1964 HiDPI frame raised frame age from ~25 to ~35 ms and cut
+    /// the delivered rate, against 2384x1536 for the scaled budget.
     static func budget(
+        limit: (width: Int, height: Int)?,
+        table: [Int: (width: Int, height: Int)]?,
+        forFps fps: Int,
+        preferLowLatency: Bool = false
+    ) -> (width: Int, height: Int)? {
+        let decoderBudget = decoderBudget(limit: limit, table: table, forFps: fps)
+        guard preferLowLatency, fps > clientLimitReferenceFps, let decoderBudget,
+              let reference = table?[clientLimitReferenceFps] ?? limit else {
+            return decoderBudget
+        }
+        let scaled = scaleLimit(reference, forFps: fps)
+        return scaled.width * scaled.height < decoderBudget.width * decoderBudget.height ? scaled : decoderBudget
+    }
+
+    private static func decoderBudget(
         limit: (width: Int, height: Int)?,
         table: [Int: (width: Int, height: Int)]?,
         forFps fps: Int

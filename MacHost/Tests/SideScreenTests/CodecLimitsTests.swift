@@ -189,6 +189,38 @@ final class CodecLimitsTests: XCTestCase {
         XCTAssertNil(CodecLimits.budget(limit: nil, table: [:], forFps: 60))
     }
 
+    // MARK: - Low latency at 120 Hz (fork)
+
+    func testLowLatencyKeeps120HzButUsesThe0_12SizeOnAFastDecoder() {
+        // OnePlus Pad 3: the decoder reports the full panel at every rate.
+        let panel = (width: 3392, height: 2400)
+        let table = [30: panel, 60: panel, 120: panel]
+        let sharp = CodecLimits.budget(limit: panel, table: table, forFps: 120)!
+        XCTAssertEqual(sharp.width, 3392, "without the preference the full decoder budget is used (#88)")
+        let fast = CodecLimits.budget(limit: panel, table: table, forFps: 120, preferLowLatency: true)!
+        XCTAssertLessThan(fast.width * fast.height, sharp.width * sharp.height)
+        let enc = CodecLimits.clampToClientLimit(width: 3024, height: 1964, limit: fast)
+        XCTAssertEqual(enc.width, 2384, "same encode size 0.12.7 used at 120 Hz")
+        XCTAssertEqual(enc.height, 1536)
+    }
+
+    func testLowLatencyChangesNothingAt60HzOrBelow() {
+        let panel = (width: 3392, height: 2400)
+        let table = [30: panel, 60: panel, 120: panel]
+        for fps in [30, 60] {
+            let a = CodecLimits.budget(limit: panel, table: table, forFps: fps)!
+            let b = CodecLimits.budget(limit: panel, table: table, forFps: fps, preferLowLatency: true)!
+            XCTAssertEqual(a.width, b.width)
+            XCTAssertEqual(a.height, b.height)
+        }
+    }
+
+    func testLowLatencyNeverGrowsAMeasuredSmallerEntry() {
+        // Honor Pad X9 (#78): the decoder's own 120 fps figure is already small.
+        let fast = CodecLimits.budget(limit: (width: 1744, height: 1040), table: honorPadX9, forFps: 120, preferLowLatency: true)!
+        XCTAssertLessThanOrEqual(fast.width * fast.height, 1248 * 752)
+    }
+
     // MARK: - Panel sides that are not multiples of 16
 
     func testHiDpiCaptureOfANativePanelKeepsTheExactPanelSize() {

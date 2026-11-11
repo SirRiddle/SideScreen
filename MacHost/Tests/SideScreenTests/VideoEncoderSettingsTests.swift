@@ -89,6 +89,30 @@ final class VideoEncoderSettingsTests: XCTestCase {
         XCTAssertEqual(VideoEncoder.averageBitRateBps(bitrateMbps: 20, gamingBoost: false), 60_000_000)
         XCTAssertEqual(VideoEncoder.averageBitRateBps(bitrateMbps: 50, gamingBoost: true), 50_000_000)
     }
+
+    // MARK: - Fork: per-transport floor and settings ceiling
+
+    func testTransportFloorAppliesUnlessGamingBoost() {
+        // WiFi floor (20) honors low settings; USB floor (60) lifts them.
+        XCTAssertEqual(VideoEncoder.averageBitRateBps(bitrateMbps: 20, gamingBoost: false, floorMbps: 20), 20_000_000)
+        XCTAssertEqual(VideoEncoder.averageBitRateBps(bitrateMbps: 30, gamingBoost: false, floorMbps: 60), 60_000_000)
+        XCTAssertEqual(VideoEncoder.averageBitRateBps(bitrateMbps: 50, gamingBoost: true, floorMbps: 60), 50_000_000)
+        XCTAssertEqual(VideoEncoder.averageBitRateBps(bitrateMbps: 5000, gamingBoost: false, floorMbps: 20), Int(Int32.max))
+    }
+
+    func testSettingsCeilingIsWithinWhatVideoToolboxAccepts() {
+        XCTAssertEqual(VideoEncoder.maxBitrateMbps, 2147)
+        XCTAssertLessThanOrEqual(DisplaySettings.maxBitrateMbps, VideoEncoder.maxBitrateMbps)
+    }
+
+    func testStoredBitratesFromOlderPresetsAreClamped() {
+        // 0.12.1–0.12.7 offered 2500/3000/4000/5000 presets.
+        for stale in [2500, 3000, 4000, 5000] {
+            XCTAssertEqual(DisplaySettings.clampBitrateMbps(stale), DisplaySettings.maxBitrateMbps)
+        }
+        XCTAssertEqual(DisplaySettings.clampBitrateMbps(80), 80)
+        XCTAssertEqual(DisplaySettings.clampBitrateMbps(5), DisplaySettings.minBitrateMbps)
+    }
 }
 
 private final class OutputCounter: @unchecked Sendable {

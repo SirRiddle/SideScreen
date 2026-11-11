@@ -693,23 +693,23 @@ struct SettingsView: View {
 
                                     VStack(spacing: 6) {
                                         HStack(spacing: 6) {
-                                            ForEach([100, 300, 500, 800, 1000, 1500], id: \.self) { value in
+                                            ForEach([100, 300, 500, 800, 1000], id: \.self) { value in
                                                 BitrateButton(label: "\(value)", value: value, currentValue: settings.bitrate, disabled: settings.gamingBoost) {
                                                     settings.bitrate = value
                                                 }
                                             }
                                         }
                                         HStack(spacing: 6) {
-                                            ForEach([2000, 2500, 3000, 4000, 5000], id: \.self) { value in
+                                            ForEach([1200, 1500, 1800], id: \.self) { value in
                                                 BitrateButton(label: "\(value)", value: value, currentValue: settings.bitrate, disabled: settings.gamingBoost) {
                                                     settings.bitrate = value
                                                 }
                                             }
-                                            // "Max" = slider/programmatic ceiling; the encoder
-                                            // clamps internally beyond what silicon sustains, so
-                                            // pinning here is honest rather than chasing the number.
-                                            BitrateButton(label: "Max", value: 5000, currentValue: settings.bitrate, disabled: settings.gamingBoost) {
-                                                settings.bitrate = 5000
+                                            // "Max" = the settings ceiling. VideoToolbox rejects or
+                                            // wraps anything above ~2147 Mbps, so presets above it
+                                            // silently set a far lower bitrate (5000 became 705).
+                                            BitrateButton(label: "Max", value: DisplaySettings.maxBitrateMbps, currentValue: settings.bitrate, disabled: settings.gamingBoost) {
+                                                settings.bitrate = DisplaySettings.maxBitrateMbps
                                             }
                                         }
                                     }
@@ -721,9 +721,9 @@ struct SettingsView: View {
                                         Slider(value: Binding(
                                             get: { Double(settings.bitrate) },
                                             set: { settings.bitrate = Int($0) }
-                                        ), in: 20...5000, step: 10)
+                                        ), in: Double(DisplaySettings.minBitrateMbps)...Double(DisplaySettings.maxBitrateMbps), step: 10)
                                         .disabled(settings.gamingBoost)
-                                        Text("5000")
+                                        Text("\(DisplaySettings.maxBitrateMbps)")
                                             .font(.system(size: 9))
                                             .foregroundColor(.secondary)
                                     }
@@ -1376,18 +1376,20 @@ class DisplaySettings: ObservableObject {
         // Legacy 1000 (the old default) → fresh conservative defaults; a custom
         // legacy value → kept on USB, capped for WiFi. Runs AFTER every stored
         // property is initialized (mirror reads connectionMode + usb/wifi).
+        // Stored values are clamped to the settings range: 0.12.1–0.12.7
+        // offered presets up to 5000 Mbps, which VideoToolbox cannot apply.
         let legacyBitrate = defaults.object(forKey: keyPrefix + "bitrate") as? Int
         if defaults.object(forKey: keyPrefix + "usbBitrateMbps") == nil {
             if let legacy = legacyBitrate, legacy != 1000 {
-                self.usbBitrateMbps = legacy
-                self.wifiBitrateMbps = min(legacy, 40)
+                self.usbBitrateMbps = Self.clampBitrateMbps(legacy)
+                self.wifiBitrateMbps = Self.clampBitrateMbps(min(legacy, 40))
             } else {
                 self.usbBitrateMbps = 80
                 self.wifiBitrateMbps = 30
             }
         } else {
-            self.usbBitrateMbps = defaults.object(forKey: keyPrefix + "usbBitrateMbps") as? Int ?? 80
-            self.wifiBitrateMbps = defaults.object(forKey: keyPrefix + "wifiBitrateMbps") as? Int ?? 30
+            self.usbBitrateMbps = Self.clampBitrateMbps(defaults.object(forKey: keyPrefix + "usbBitrateMbps") as? Int ?? 80)
+            self.wifiBitrateMbps = Self.clampBitrateMbps(defaults.object(forKey: keyPrefix + "wifiBitrateMbps") as? Int ?? 30)
         }
         self.bitrate = connectionMode == .usb ? usbBitrateMbps : wifiBitrateMbps
 
@@ -1403,6 +1405,16 @@ class DisplaySettings: ObservableObject {
         let name: String
         let ratio: String
         let resolutions: [String]
+    }
+
+    /// Bitrate range offered by the settings UI, in Mbps. The ceiling sits
+    /// below VideoEncoder.maxBitrateMbps (~2147, the most VideoToolbox
+    /// accepts) on a round value.
+    static let minBitrateMbps = 20
+    static let maxBitrateMbps = 2000
+
+    static func clampBitrateMbps(_ value: Int) -> Int {
+        min(max(value, minBitrateMbps), maxBitrateMbps)
     }
 
     static let resolutionGroups: [ResolutionGroup] = [

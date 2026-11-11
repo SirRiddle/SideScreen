@@ -32,6 +32,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.constraintlayout.widget.ConstraintSet
+import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.slider.Slider
@@ -414,9 +415,7 @@ class MainActivity : AppCompatActivity() {
                     .toString()
                     .ifEmpty { "127.0.0.1" }
             val port =
-                binding.portInput.text
-                    .toString()
-                    .toIntOrNull() ?: 54321
+                PreferencesManager.parsePort(binding.portInput.text) ?: PreferencesManager.DEFAULT_PORT
 
             // Convert localhost to 127.0.0.1 for better Android compatibility
             if (host.equals("localhost", ignoreCase = true)) {
@@ -443,6 +442,16 @@ class MainActivity : AppCompatActivity() {
             advancedVisible = !advancedVisible
             binding.advancedSettings.visibility = if (advancedVisible) View.VISIBLE else View.GONE
             binding.showAdvanced.text = if (advancedVisible) "Hide Advanced Settings" else "Advanced Settings"
+        }
+
+        // Custom USB port survives relaunches (issue #118); "Use default port" restores 54321.
+        binding.portInput.setText(prefs.usbPort.toString())
+        binding.portInput.doAfterTextChanged { text ->
+            PreferencesManager.parsePort(text)?.let { prefs.usbPort = it }
+        }
+        binding.resetPortLink.setOnClickListener {
+            prefs.usbPort = PreferencesManager.DEFAULT_PORT
+            binding.portInput.setText(PreferencesManager.DEFAULT_PORT.toString())
         }
 
         // Initial status
@@ -1869,9 +1878,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             val port =
-                binding.portInput.text
-                    .toString()
-                    .toIntOrNull() ?: 54321
+                PreferencesManager.parsePort(binding.portInput.text) ?: PreferencesManager.DEFAULT_PORT
             val isServerRunning = checkServerRunning("127.0.0.1", port)
             runOnUiThread {
                 // Final check before updating UI

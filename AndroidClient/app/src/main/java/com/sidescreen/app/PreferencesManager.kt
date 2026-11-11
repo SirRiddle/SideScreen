@@ -8,6 +8,10 @@ class PreferencesManager(
 ) {
     private val prefs: SharedPreferences = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
 
+    /** Own file so backups can exclude it (res/xml/backup_rules.xml, data_extraction_rules.xml). */
+    private val identityPrefs: SharedPreferences =
+        context.getSharedPreferences("device_identity", Context.MODE_PRIVATE)
+
     var showStatsOverlay: Boolean
         get() = prefs.getBoolean("show_stats", true)
         set(value) = prefs.edit().putBoolean("show_stats", value).apply()
@@ -41,6 +45,16 @@ class PreferencesManager(
         get() = prefs.getBoolean("hide_settings_button", false)
         set(value) = prefs.edit().putBoolean("hide_settings_button", value).apply()
 
+    /**
+     * USB-mode port from Advanced Settings (issue #118: it reset to the default on every launch).
+     * Out-of-range stored values read back as [DEFAULT_PORT].
+     */
+    var usbPort: Int
+        get() = prefs.getInt("usb_port", DEFAULT_PORT).takeIf { isValidPort(it) } ?: DEFAULT_PORT
+        set(value) {
+            if (isValidPort(value)) prefs.edit().putInt("usb_port", value).apply()
+        }
+
     var connectionMode: ConnectionMode
         get() = ConnectionMode.fromName(prefs.getString("connection_mode", null))
         set(value) = prefs.edit().putString("connection_mode", value.name).apply()
@@ -48,13 +62,24 @@ class PreferencesManager(
     /**
      * Stable identity sent to the Mac (wire type 18) so the host can bring back this tablet's
      * settings every time. Random, generated once; survives reconnects and
-     * reboots, resets only with a reinstall or clearing app data.
+     * reboots, resets only with a reinstall or clearing app data. Never backed up or transferred,
+     * so a restored or cloned tablet gets an identity (and Mac profile) of its own.
      */
     val deviceId: String
         get() {
-            prefs.getString("device_id", null)?.let { return it }
+            identityPrefs.getString("device_id", null)?.let { return it }
             val fresh = java.util.UUID.randomUUID().toString()
-            prefs.edit().putString("device_id", fresh).apply()
+            identityPrefs.edit().putString("device_id", fresh).apply()
             return fresh
         }
+
+    companion object {
+        /** The Mac app's default port (SettingsWindow.swift). */
+        const val DEFAULT_PORT = 54321
+
+        fun isValidPort(port: Int): Boolean = port in 1..65535
+
+        /** Port typed into Advanced Settings, or null when empty or not a valid port. */
+        fun parsePort(text: CharSequence?): Int? = text?.toString()?.trim()?.toIntOrNull()?.takeIf { isValidPort(it) }
+    }
 }

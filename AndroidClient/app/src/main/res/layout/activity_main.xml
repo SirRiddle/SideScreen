@@ -447,6 +447,18 @@
                         android:inputType="number" />
                 </com.google.android.material.textfield.TextInputLayout>
 
+                <!-- Restores the Mac app's default port (issue #118) -->
+                <TextView
+                    android:id="@+id/resetPortLink"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="end"
+                    android:background="?attr/selectableItemBackground"
+                    android:padding="8dp"
+                    android:text="Use default port (54321)"
+                    android:textColor="#8ab4ff"
+                    android:textSize="13sp" />
+
             </LinearLayout>
 
             <!-- Show Advanced link -->

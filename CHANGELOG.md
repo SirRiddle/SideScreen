@@ -44,6 +44,7 @@ Synced with upstream 1.1.1 (everything except Play Store, demo mode and website 
 - **Android: a dead WiFi link showed a frozen picture with a green "Connected" for 15+ minutes** (#72). The app now notices within about 10 seconds and reconnects.
 - **Android: tablets paired by code with the camera permission denied** opened on the camera-permission screen every launch instead of their saved pairing (#73).
 - **Android: custom port forgotten on every launch** (#117, #118).
+- **Mac: the Side Screen display lost its wallpaper (and arrangement) on every resolution change** (#108). The virtual display's identity no longer depends on the exact resolution, only on orientation and HiDPI, so macOS recognises it as the same display. The first launch of 1.2.0 counts as a new display once.
 - **Android: one log line written to storage for every frame** while the app was in the background (#74).
 - **Blurry picture on tablets whose stream was shrunk well below the panel** (upstream #78 / #88). The tablet now reports the size its decoder sustains at 30, 60 and 120 fps separately (new client→server wire type 14, sent after the old single figure, type 11), and the Mac uses the entry for the rate it streams at instead of scaling the 60 fps figure — which on a 2800×1840 MatePad Air at 120 Hz turned the full panel into 1968×1280. Tablets whose HEVC decoder sustains less than H.264 now ask for H.264. Needs both apps updated; either works with the older version of the other.
 

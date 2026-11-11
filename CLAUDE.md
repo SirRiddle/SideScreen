@@ -77,5 +77,5 @@ Hard invariants (golden-byte tests in `HandshakeCodecTests.swift` / `AuthHandsha
 - Gesture aborts (`cancelActiveRemoteGesture`) must release the synthetic left button for BOTH `.dragging` and `.penDrawing` — pen mode holds the button down for whole strokes, and missing either strands the Mac mouse down until a real click.
 - Token + video travel plaintext (UserDefaults storage on both sides, `usesCleartextTraffic=true`).
 - SCStream dies with error -3815 on display sleep — wake observers + CGDisplayStream fallback (`ScreenCapture.swift`) handle it; don't remove.
-- `VirtualDisplayManager` encodes W×H into the virtual display productID to avoid portrait/landscape collisions; changing it resets users' OS display arrangements.
+- `VirtualDisplayManager.productID` is the display identity (→ macOS display UUID, which keys wallpaper, arrangement and scaling). It encodes only orientation + HiDPI (#108), so resolution changes keep the same display; portrait vs landscape stay distinct. Changing the scheme again resets every user's wallpaper/arrangement for the Side Screen display once.
 - `CodecCapabilities.kt` deliberately excludes software HEVC (c2.android/omx.google) and broken Spreadtrum/Unisoc HW HEVC (omx.sprd.*/c2.sprd.*) — they black-screen; do not "re-enable".

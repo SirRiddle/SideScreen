@@ -30,7 +30,7 @@ cd AndroidClient && ./gradlew :app:testDebugUnitTest   # JUnit4 unit tests
 ./scripts/bump-version.sh [major|minor|patch]  # edits ONLY VERSION; gradle + scripts read it at build time
 ```
 
-CI: `.github/workflows/build-mac.yml` (macos-14, universal build + swiftlint --strict), `build-android.yml` (JDK 17, assembleDebug + ktlint), `release.yml` (on numeric tags).
+CI: `.github/workflows/build-mac.yml` (macos-15, universal build + swift test + swiftlint --strict), `build-android.yml` (JDK 17, assembleDebug + ktlint), `release.yml` (on numeric tags).
 
 ## Architecture
 
@@ -50,12 +50,12 @@ Touch: MainActivity → StreamClient.sendTouch (type 2, dedicated thread)
 
 ## Wire protocol — do NOT break
 
-Single TCP stream, **mixed endianness by design** (BE for headers, LE inside touch/ping payloads — never "fix"). Message types: server→client `0` legacy frame, `6` frame+metadata, `1` display config (transform packs rotation + 1000·hflip + 2000·vflip), `5` pong, `10` codecSelected (send ONLY to clients that sent type 9), `13` desktop geometry (BE32×2, send ONLY to clients that sent type 12); client→server `2` touch, `4` ping, `7` keyframe request, `8` metadata opt-in, `9` AVC-only, `11` decoder limits, `12` desktop-geometry opt-in (payload-free).
+Single TCP stream, **mixed endianness by design** (BE for headers, LE inside touch/ping payloads — never "fix"). Message types: server→client `0` legacy frame, `6` frame+metadata, `1` display config (transform packs rotation + 1000·hflip + 2000·vflip), `5` pong, `10` codecSelected (send ONLY to clients that sent type 9), `13` desktop geometry (BE32×2, send ONLY to clients that sent type 12); client→server `2` touch, `4` ping, `7` keyframe request, `8` metadata opt-in, `9` AVC-only, `11` decoder limits, `12` desktop-geometry opt-in (payload-free), `14` decoder-limit table (12 bytes: a 4-byte type-11-encoded size at each of 30/60/120 fps, every byte high-bit set; `DecoderLimitWire`/`CodecLimits.tableFps`), `18` device identity (per-install UUID + name, nibble-encoded with high bits set; `DeviceIdentityWire`/`DeviceIdentityCodec`, keys the Mac's per-tablet profile). Types **15–17 are reserved** upstream; **never assign 15**: fork 0.12.1 clients sent a bare type 15 (withdrawn audio opt-in), and fork 0.12.1 hosts sent server→client type 14 audio frames.
 
 Hard invariants (golden-byte tests in `HandshakeCodecTests.swift` / `AuthHandshakeTest.kt`):
 
 1. Handshake prefix is exactly **37 bytes** `[magic 4][token 32][name_len 1]`; SSPC deliberately mirrors SSWA's layout so *old hosts reply SSWR/invalidMagic instead of stalling*.
-2. Client capability adverts are ordered **9 → 11 → 12 → 8**: type 8 can trigger the server's early protocol finish (`StreamClient.kt`).
+2. Client capability adverts are ordered **9 → 11 → 14 → 12 → 18 → 8**: type 8 can trigger the server's early protocol finish, and the Mac picks the tablet's profile when type 8 lands (`StreamClient.kt`, both the USB and wireless connect paths).
 3. New message types must be payload-free or use high-bit-set payload bytes — old hosts skip unknown types byte-by-byte. Payload-bearing extensions to EXISTING types (e.g. touch) are forbidden outright without advert+ack negotiation (see rejected upstream PR #33); the ack direction must be opt-in-gated because old ANDROID clients hard-disconnect on unknown server→client types.
 4. Token is exactly 32 bytes; device name 1–64 bytes; pairing code exactly 8 digits.
 5. Annex-B stream with VPS/SPS/PPS on every keyframe; sync detection = HEVC NAL types 16–21 vs H.264 IDR type 5 (`SyncFrameDetectionTest.kt`).
